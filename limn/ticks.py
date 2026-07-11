@@ -270,6 +270,35 @@ def axis_formatter(ticks, percent=False, currency=None):
     return fmt
 
 
+def fmt_log(v, percent=False, currency=None):
+    """Labels for decade ticks: compact from 1k up, uniform all the way.
+
+    A log axis reading ``1 · 10 · 100 · 1k · 10k · 1M`` is one visual
+    system; fmt_value's 10k compaction threshold would mix styles at the
+    thousands boundary.
+    """
+    if v is None:
+        return ""
+    a = abs(v)
+    body = None
+    for cut, suf in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "k")):
+        if a >= cut:
+            body = "{:,.2f}".format(v / cut).rstrip("0").rstrip(".") + suf
+            break
+    if body is None:
+        if 0 < a < 1e-4:
+            body = "%g" % v
+        elif a < 1:
+            body = "{:.6f}".format(v).rstrip("0").rstrip(".")
+        else:
+            body = "{:,.0f}".format(v)
+    if currency:
+        body = (currency + body) if v >= 0 else ("-" + currency + body.lstrip("-"))
+    if percent:
+        body += "%"
+    return body
+
+
 def fmt_value(v, percent=False, currency=None):
     """Compact single-value format for direct labels and notes."""
     if v is None or (isinstance(v, float) and math.isnan(v)):

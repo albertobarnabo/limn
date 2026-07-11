@@ -14,19 +14,26 @@ the plot, caption bottom-left.  A single series gets no legend: the title
 already names it.
 """
 
+import itertools
 import sys
 import math
 
+from .coerce import parse_number, parse_temporal
 from .ingest import ingest, IngestError, NUMBER, TEMPORAL, CATEGORY
 from .marks import (draw_lines, draw_areas, draw_bars, draw_scatter,
-                    draw_heatmap, stack_series, size_scale, _emit_bar)
+                    draw_heatmap, draw_boxes, box_stats, stack_series,
+                    size_scale, decimate, _emit_bar)
 from .metrics import text_width, truncate_to
 from .scales import Linear, Time, Log, Band
 from .svg import El, document, to_string, crisp
 from .theme import get_theme
-from .ticks import axis_formatter, fmt_value
+from .ticks import axis_formatter, fmt_value, fmt_log
 
 MIN_PLOT = 60  # px; below this the figure is too small to be honest
+
+# SVG ids are document-global; faceted figures nest many sub-documents,
+# so every id-bearing element takes a fresh one.
+_uid = itertools.count(1)
 
 
 class Figure:
@@ -49,6 +56,14 @@ class Figure:
         self._w, self._h = 720.0, 432.0
         self._legend = "auto"
         self._notes_shown = False
+        self._facet = opts.pop("facet", None)
+        self._hlines = []
+        self._vlines = []
+        self._flags = []
+        self._ylim_v = None
+        self._xlim_v = None
+        self._force = {}      # facet machinery: shared domains & orders
+        self._panel = False   # True when this figure is one facet panel
 
     # -- fluent style ------------------------------------------------------
 
@@ -89,22 +104,65 @@ class Figure:
         self.notes.append(text)
         return self
 
+    # -- annotations ---------------------------------------------------------
+
+    def hline(self, y, label=None, color=None):
+        """A horizontal reference line at value *y* (a target, a limit)."""
+        self._hlines.append((y, label, color))
+        return self
+
+    def vline(self, x, label=None, color=None):
+        """A vertical reference line at *x* — a date, number, or category
+        (an event, a deadline, the moment everything changed)."""
+        self._vlines.append((x, label, color))
+        return self
+
+    def flag(self, x, y, text):
+        """Call out one point: a ringed dot at (x, y) with a short label."""
+        self._flags.append((x, y, text))
+        return self
+
+    def ylim(self, lo, hi):
+        """Fix the value-axis range (overrides the computed domain)."""
+        self._ylim_v = (float(lo), float(hi))
+        return self
+
+    def xlim(self, lo, hi):
+        """Fix a numeric x-axis range (overrides the computed domain)."""
+        self._xlim_v = (float(lo), float(hi))
+        return self
+
     # -- output ------------------------------------------------------------
 
     def to_svg(self):
         return to_string(self._build())
 
     def save(self, path):
-        if not str(path).endswith(".svg"):
-            path = str(path) + ".svg"
-        svg = self.to_svg()
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(svg)
+        path = str(path)
+        if path.endswith(".png"):
+            self._save_png(path)
+        else:
+            if not path.endswith(".svg"):
+                path += ".svg"
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self.to_svg())
         if self.notes and not self._notes_shown:
             for n in self.notes:
                 print("limn · %s" % n, file=sys.stderr)
             self._notes_shown = True
         return self
+
+    def _save_png(self, path):
+        """PNG is an escape hatch, not a dependency: uses cairosvg if
+        (and only if) the user installed it."""
+        try:
+            import cairosvg
+        except ImportError:
+            raise RuntimeError(
+                "PNG export needs the optional rasterizer: pip install "
+                "cairosvg — or save as .svg, which needs nothing")
+        cairosvg.svg2png(bytestring=self.to_svg().encode("utf-8"),
+                         write_to=path, output_width=int(self._w * 2))
 
     def _repr_svg_(self):
         return self.to_svg()
@@ -164,10 +222,12 @@ class Figure:
         if self._by is not None:
             bycol = self._col(self._by)
             ycol = ycols[0]
-            groups = []
-            for i, g in enumerate(bycol.values):
-                if g is not None and g not in groups:
-                    groups.append(g)
+            groups = self._force.get("groups")
+            if groups is None:
+                groups = []
+                for g in bycol.values:
+                    if g is not None and g not in groups:
+                        groups.append(g)
             return [{
                 "name": str(g),
                 "color": theme.series_color(i),
@@ -181,24 +241,51 @@ class Figure:
             "points": list(zip(xcol.values, y.values)),
         } for i, y in enumerate(ycols)]
 
+    def _apply_style(self, series):
+        """User overrides: color= (str, list, or {name: hex}), dash=."""
+        color = self._opts.get("color")
+        if isinstance(color, str):
+            for s in series:
+                s["color"] = color
+        elif isinstance(color, dict):
+            for s in series:
+                if s["name"] in color:
+                    s["color"] = color[s["name"]]
+        elif isinstance(color, (list, tuple)):
+            for s, c in zip(series, color):
+                s["color"] = c
+        dash = self._opts.get("dash")
+        if dash:
+            names = set(dash) if not isinstance(dash, str) else {dash}
+            for s in series:
+                if s["name"] in names:
+                    s["dash"] = True
+
     # -- build ----------------------------------------------------------------
 
     def _build(self):
         theme = get_theme(self._theme)
+        if self._facet:
+            return self._build_facets(theme)
         if self.kind == "heatmap":
             return self._build_heatmap(theme)
+        return self._build_common(theme, *self._prepare(theme))
+
+    def _prepare(self, theme):
+        """Resolve data into (spec, series) — everything but pixels."""
         if self.kind == "hist":
-            return self._build_common(theme, *self._prep_hist(theme))
+            return self._prep_hist(theme)
+        if self.kind == "box":
+            return self._prep_box(theme)
         xcol, ycols = self._resolve_xy()
         series = self._series(xcol, ycols, theme)
+        self._apply_style(series)
         series = [s for s in series if any(v is not None for _x, v in s["points"])]
         if not series:
             raise IngestError("nothing to plot — every value is missing")
         if self.kind == "bar":
-            return self._build_common(theme, *self._prep_bar(series, xcol,
-                                                             ycols, theme))
-        return self._build_common(theme, *self._prep_xy(series, xcol, ycols,
-                                                        theme))
+            return self._prep_bar(series, xcol, ycols, theme)
+        return self._prep_xy(series, xcol, ycols, theme)
 
     # each _prep_* returns (spec, series) where spec drives the shared layout
 
@@ -235,11 +322,15 @@ class Figure:
                     s["points"] = [(x, v if v is not None and v > 0 else None)
                                    for x, v in s["points"]]
                 values = positive
-            sy = Log(min(values), max(values), self._ytarget())
+            vlo, vhi = self._y_domain(min(values), max(values))
+            sy = Log(vlo, vhi, self._ytarget())
         else:
             include_zero = self.kind == "area"
             pad = 0.05 if self.kind in ("line", "scatter") else 0.0
-            sy = Linear(min(values), max(values), self._ytarget(),
+            vlo, vhi = self._y_domain(min(values), max(values))
+            if (vlo, vhi) != (min(values), max(values)):
+                include_zero, pad = False, 0.0    # an explicit range is law
+            sy = Linear(vlo, vhi, self._ytarget(),
                         include_zero=include_zero, pad_frac=pad)
 
         sx = self._x_scale(xcol, series)
@@ -260,18 +351,20 @@ class Figure:
         for s in series:
             s["points"] = [(None if x is None else _cat(x), v)
                            for x, v in s["points"]]
-        order = []
-        for s in series:
-            for c, _v in s["points"]:
-                if c is not None and c not in order:
-                    order.append(c)
-        if sort in ("y", "-y"):
-            first = dict(series[0]["points"])
-            order.sort(key=lambda c: (first.get(c) is None,
-                                      first.get(c, 0.0)),
-                       reverse=(sort == "-y"))
-        elif sort == "x":
-            order.sort()
+        order = self._force.get("xcats")
+        if order is None:
+            order = []
+            for s in series:
+                for c, _v in s["points"]:
+                    if c is not None and c not in order:
+                        order.append(c)
+            if sort in ("y", "-y"):
+                first = dict(series[0]["points"])
+                order.sort(key=lambda c: (first.get(c) is None,
+                                          first.get(c, 0.0)),
+                           reverse=(sort == "-y"))
+            elif sort == "x":
+                order.sort()
         band = Band(order)
 
         if stacked and len(series) > 1:
@@ -287,8 +380,9 @@ class Figure:
         else:
             values = [v for s in series for _c, v in s["points"]
                       if v is not None]
-        sy = Linear(min(values), max(values),
-                    self._ytarget(horizontal), include_zero=True)
+        vlo, vhi = self._y_domain(min(values), max(values))
+        sy = Linear(vlo, vhi, self._ytarget(horizontal),
+                    include_zero=(vlo, vhi) == (min(values), max(values)))
         ycol = ycols[0]
         spec = dict(sx=band, sy=sy, stacked=stacked, horizontal=horizontal,
                     percent=getattr(ycol, "percent", False),
@@ -312,15 +406,19 @@ class Figure:
         values = sorted(v for v in col.values if v is not None)
         if not values:
             raise IngestError("hist: every value in %r is missing" % col.name)
-        edges = _bin_edges(values, self._opts.get("bins", "auto"))
+        edges = self._force.get("edges") \
+            or _bin_edges(values, self._opts.get("bins", "auto"))
         counts = [0] * (len(edges) - 1)
         j = 0
         for v in values:
+            if v < edges[0] or v > edges[-1]:
+                continue
             while j < len(counts) - 1 and v >= edges[j + 1]:
                 j += 1
             counts[j] += 1
         sx = Linear(edges[0], edges[-1], self._xtarget())
-        sy = Linear(0, max(counts), self._ytarget(), include_zero=True)
+        clo, chi = self._y_domain(0, max(counts))
+        sy = Linear(clo, chi, self._ytarget(), include_zero=True)
         series = [{"name": col.name, "color": theme.series_color(0),
                    "points": []}]
         spec = dict(sx=sx, sy=sy, stacked=False, horizontal=False,
@@ -328,15 +426,85 @@ class Figure:
                     band_axis=None, hist=(edges, counts))
         return spec, series
 
+    def _prep_box(self, theme):
+        ycol = self._col(self._y) if self._y is not None \
+            else self.table.first_of_kind(NUMBER)
+        if ycol is None or ycol.kind != NUMBER:
+            raise IngestError("box needs a numeric column"
+                              + ("" if ycol is None else
+                                 " — %r is %s" % (ycol.name, ycol.kind)))
+        if self._x is not None:
+            xcol = self._col(self._x)
+        else:
+            xcol = self.table.first_of_kind(CATEGORY)
+        if xcol is not None:
+            groups = {}
+            for cat, v in zip(xcol.values, ycol.values):
+                if cat is None or v is None:
+                    continue
+                groups.setdefault(_cat(cat), []).append(v)
+        else:
+            groups = {ycol.name: [v for v in ycol.values if v is not None]}
+        if not any(groups.values()):
+            raise IngestError("box: every value in %r is missing" % ycol.name)
+        stats = [(cat, box_stats(vals)) for cat, vals in groups.items()
+                 if vals]
+        band = Band([c for c, _s in stats])
+        all_vals = [v for vals in groups.values() for v in vals]
+        vlo, vhi = self._y_domain(min(all_vals), max(all_vals))
+        sy = Linear(vlo, vhi, self._ytarget(), pad_frac=0.05)
+        series = [{"name": ycol.name, "color": theme.series_color(0),
+                   "points": []}]
+        spec = dict(sx=band, sy=sy, stacked=False, horizontal=False,
+                    percent=ycol.percent, currency=ycol.currency,
+                    band_axis="x", box=stats)
+        return spec, series
+
+    def _y_domain(self, lo, hi):
+        """Data extent, unless the user (or the facet grid) says otherwise."""
+        if "ylo" in self._force:
+            return self._force["ylo"], self._force["yhi"]
+        if self._ylim_v:
+            return self._ylim_v
+        return lo, hi
+
     def _x_scale(self, xcol, series):
+        if self._opts.get("xlog"):
+            if xcol.kind != NUMBER:
+                raise IngestError("xlog needs a numeric x column — "
+                                  "%r is %s" % (xcol.name, xcol.kind))
+            dropped = 0
+            for s in series:
+                pts = []
+                for x, v in s["points"]:
+                    if x is not None and x <= 0:
+                        dropped += 1
+                        x = None
+                    pts.append((x, v))
+                s["points"] = pts
+            if dropped:
+                self.notes.append("log x axis: dropped %d non-positive "
+                                  "value%s" % (dropped,
+                                               "s" if dropped != 1 else ""))
         xs = [x for s in series for x, _v in s["points"] if x is not None]
         if not xs:
             raise IngestError("nothing to plot on the x axis — "
                               "column %r is all missing" % xcol.name)
+        if self._opts.get("xlog"):
+            lo, hi = self._force.get("xlo", min(xs)), self._force.get("xhi", max(xs))
+            return Log(lo, hi, self._xtarget())
         if xcol.kind == TEMPORAL:
-            return Time(min(xs), max(xs), self._xtarget())
+            lo, hi = self._force.get("xlo", min(xs)), self._force.get("xhi", max(xs))
+            return Time(lo, hi, self._xtarget())
         if xcol.kind == CATEGORY:
-            return Band([x for x in xcol.values if x is not None])
+            cats = self._force.get("xcats") \
+                or [x for x in xcol.values if x is not None]
+            return Band(cats)
+        if "xlo" in self._force:
+            return Linear(self._force["xlo"], self._force["xhi"],
+                          self._xtarget())
+        if self._xlim_v:
+            return Linear(self._xlim_v[0], self._xlim_v[1], self._xtarget())
         pad = 0.02 if self.kind == "scatter" else 0.0
         return Linear(min(xs), max(xs), self._xtarget(), pad_frac=pad)
 
@@ -353,8 +521,11 @@ class Figure:
         w, h = self._w, self._h
         sx, sy = spec["sx"], spec["sy"]
         # sy is always the value scale; horizontal only changes where it renders
-        vfmt = axis_formatter(sy.tick_values(), percent=spec["percent"],
-                              currency=spec["currency"])
+        if isinstance(sy, Log):
+            vfmt = lambda v: fmt_log(v, spec["percent"], spec["currency"])
+        else:
+            vfmt = axis_formatter(sy.tick_values(), percent=spec["percent"],
+                                  currency=spec["currency"])
         label_fmt = lambda v: fmt_value(v, spec["percent"], spec["currency"])
 
         # ---- measure text, derive margins
@@ -448,9 +619,21 @@ class Figure:
         g = root
 
         self._draw_grid(g, theme, spec, px0, px1, py0, py1)
-        marks = g.add(El("g"))
+        clip_id = "limnclip%d" % next(_uid)
+        # generous on the side where bar value labels live; the clip's job
+        # is only to stop ylim'd marks from bleeding across the figure
+        pad_top = 26 if spec.get("bar_labels") else 6
+        pad_right = 110 if spec.get("bar_labels") and spec["horizontal"] else 1
+        defs = g.add(El("defs"))
+        defs.add(El("clipPath", [El("rect", x=px0 - 6, y=py0 - pad_top,
+                                    width=px1 - px0 + 6 + pad_right,
+                                    height=py1 - py0 + 2 * pad_top)],
+                    id=clip_id))
+        marks = g.add(El("g", clip_path="url(#%s)" % clip_id))
         self._draw_marks(marks, theme, spec, series, band, centers, to_v,
                          to_x, to_y, label_fmt, px0, px1, py0, py1)
+        self._draw_annotations(g, theme, spec, to_x, to_y, to_v,
+                               px0, px1, py0, py1)
         self._draw_axes(g, theme, spec, vfmt, px0, px1, py0, py1)
         y_cursor = self._draw_header(g, theme, legend_rows)
         if self._ylabel:
@@ -506,11 +689,18 @@ class Figure:
                           zero, sy.to_px(count, py1, py0),
                           series[0]["color"], theme, False, "top", False)
             return
+        if "box" in spec:
+            draw_boxes(g, spec["box"], band, to_v, centers, theme,
+                       series[0]["color"])
+            return
         if self.kind == "bar":
             draw_bars(g, series, band, to_v, centers, theme,
                       spec["stacked"], spec["horizontal"],
                       spec.get("bar_labels", False), label_fmt, theme.ink2)
         elif self.kind == "line":
+            budget = int((px1 - px0) * 4)
+            series = [dict(s, points=decimate(s["points"], to_x, budget))
+                      if len(s["points"]) > budget else s for s in series]
             draw_lines(g, series, to_x, to_y, theme,
                        markers=self._opts.get("markers", True))
         elif self.kind == "area":
@@ -574,7 +764,8 @@ class Figure:
             labels = list(zip((sx.to_px(t, px0, px1)
                                for t in sx.tick_values()), sx.tick_labels()))
         else:
-            xfmt = axis_formatter(sx.tick_values())
+            xfmt = fmt_log if isinstance(sx, Log) \
+                else axis_formatter(sx.tick_values())
             labels = [(sx.to_px(t, px0, px1), xfmt(t))
                       for t in sx.tick_values()]
         labels = _thin_labels(labels, theme.size_axis)
@@ -582,13 +773,98 @@ class Figure:
             g.add(El("text", [label], x=x, y=py1 + theme.size_axis + 6,
                      text_anchor="middle", **axis_style))
 
+    # -- annotations: reference lines and callouts ------------------------------
+
+    def _draw_annotations(self, g, theme, spec, to_x, to_y, to_v,
+                          px0, px1, py0, py1):
+        for value, label, color in self._hlines:
+            v = _as_number(value)
+            if v is None:
+                self.notes.append("hline: %r is not a number — skipped"
+                                  % (value,))
+                continue
+            color = color or theme.ink2
+            if spec["horizontal"]:      # the value axis runs horizontally
+                x = to_v(v)
+                if not px0 <= x <= px1:
+                    self.notes.append("hline at %s is outside the value "
+                                      "range — skipped" % value)
+                    continue
+                self._ref_vertical(g, theme, x, label, color, px0, px1,
+                                   py0, py1)
+            else:
+                y = to_y(v)
+                if not py0 <= y <= py1:
+                    self.notes.append("hline at %s is outside the value "
+                                      "range — skipped" % value)
+                    continue
+                g.add(El("line", x1=px0, x2=px1, y1=y, y2=y, stroke=color,
+                         stroke_width=1, stroke_dasharray="5 4"))
+                if label:
+                    g.add(El("text", [label], x=px1 - 2, y=y - 5,
+                             text_anchor="end", font_size=theme.size_caption,
+                             fill=color))
+        for value, label, color in self._vlines:
+            if spec["horizontal"]:
+                self.notes.append("vline on a horizontal chart has no axis "
+                                  "to live on — use hline for the value")
+                continue
+            xv = self._annotation_x(spec["sx"], value)
+            x = to_x(xv) if xv is not None else None
+            if x is None or not px0 <= x <= px1:
+                self.notes.append("vline at %r is outside the x range — "
+                                  "skipped" % (value,))
+                continue
+            self._ref_vertical(g, theme, x, label, color or theme.ink2,
+                               px0, px1, py0, py1)
+        for xval, yval, text in self._flags:
+            xv = self._annotation_x(spec["sx"], xval)
+            yv = _as_number(yval)
+            x = to_x(xv) if xv is not None else None
+            y = to_y(yv) if yv is not None else None
+            if x is None or y is None:
+                self.notes.append("flag %r is outside the data space — "
+                                  "skipped" % text)
+                continue
+            g.add(El("circle", cx=x, cy=y, r=5.5, fill="none",
+                     stroke=theme.ink, stroke_width=1.5))
+            g.add(El("circle", cx=x, cy=y, r=1.8, fill=theme.ink))
+            w = text_width(text, theme.size_label)
+            tx, anchor = x + 10, "start"
+            if tx + w > px1:
+                tx, anchor = x - 10, "end"
+            ty = min(max(y + 4, py0 + 12), py1 - 4)
+            g.add(El("text", [text], x=tx, y=ty, text_anchor=anchor,
+                     font_size=theme.size_label, fill=theme.ink,
+                     font_weight="600"))
+
+    def _ref_vertical(self, g, theme, x, label, color, px0, px1, py0, py1):
+        g.add(El("line", x1=x, x2=x, y1=py0, y2=py1, stroke=color,
+                 stroke_width=1, stroke_dasharray="5 4"))
+        if label:
+            w = text_width(label, theme.size_caption)
+            tx, anchor = x + 5, "start"
+            if tx + w > px1:
+                tx, anchor = x - 5, "end"
+            g.add(El("text", [label], x=tx, y=py0 + 11, text_anchor=anchor,
+                     font_size=theme.size_caption, fill=color))
+
+    def _annotation_x(self, sx, value):
+        """Coerce an annotation's x to whatever the x scale speaks."""
+        if isinstance(sx, Band):
+            return _cat(value)
+        if isinstance(sx, Time):
+            return parse_temporal(value)
+        return _as_number(value)
+
     def _draw_header(self, g, theme, legend_rows):
         y = 12.0
         if self._title:
-            y += theme.size_title
+            size = 12.5 if self._panel else theme.size_title
+            y += size
             g.add(El("text", [self._title], x=14, y=y, fill=theme.ink,
-                     font_size=theme.size_title, font_weight="600"))
-            y += 8 - theme.size_title + theme.size_title
+                     font_size=size, font_weight="600"))
+            y += 8
         if self._subtitle:
             y += theme.size_subtitle - 2
             g.add(El("text", [self._subtitle], x=14, y=y, fill=theme.ink2,
@@ -700,7 +976,7 @@ class Figure:
         hi_w = text_width(fmt(hi), theme.size_caption)
         x1 = w - 16 - hi_w - 5 - bar_w
         y = max(top - 22, 10)
-        grad_id = "limnramp"
+        grad_id = "limnramp%d" % next(_uid)
         defs = root.add(El("defs"))
         grad = defs.add(El("linearGradient", id=grad_id, x1=0, y1=0,
                            x2=1, y2=0))
@@ -717,7 +993,156 @@ class Figure:
                     font_size=theme.size_caption, fill=theme.muted))
 
 
+    # -- small multiples --------------------------------------------------------
+
+    def _build_facets(self, theme):
+        """One panel per facet value, sharing scales, colors, and bins.
+
+        Sharing is the whole point: a grid of panels with private y axes
+        is a lie detector's nightmare.  Domains, category orders, series
+        colors, and histogram bin edges are computed once, from all the
+        data, and imposed on every panel.
+        """
+        if self.kind in ("heatmap", "box"):
+            raise IngestError("facet isn't supported for %s charts"
+                              % self.kind)
+        fcol = self._col(self._facet)
+        panels, row_index = [], {}
+        for i, v in enumerate(fcol.values):
+            if v is None:
+                continue
+            key = _cat(v)
+            if key not in row_index:
+                row_index[key] = []
+                panels.append(key)
+            row_index[key].append(i)
+        if not panels:
+            raise IngestError("facet column %r is all missing" % fcol.name)
+
+        force = {}
+        if self._by is not None:
+            bycol = self._col(self._by)
+            groups = []
+            for g in bycol.values:
+                if g is not None and g not in groups:
+                    groups.append(g)
+            force["groups"] = groups
+        if self.kind == "hist":
+            col = None
+            for key in (self._y, self._x):
+                if key is not None:
+                    col = self._col(key)
+                    break
+            col = col or self.table.first_of_kind(NUMBER)
+            if col is None or col.kind != NUMBER:
+                raise IngestError("hist needs a numeric column to facet")
+            pooled = sorted(v for v in col.values if v is not None)
+            force["edges"] = _bin_edges(pooled, self._opts.get("bins", "auto"))
+
+        children = []
+        for key in panels:
+            idx = row_index[key]
+            data = {c.name: [c.raw[i] for i in idx]
+                    for c in self.table.columns if c.name != fcol.name}
+            child = Figure(self.kind, data, x=self._x, y=self._y,
+                           by=self._by, size=self._size,
+                           **{k: v for k, v in self._opts.items()
+                              if k != "cols"})
+            child.notes = []          # the parent told the story once
+            child._theme = self._theme
+            child._legend = "none"
+            child._panel = True
+            child._opts["markers"] = False   # beads read as dashes at panel size
+            child._title = key
+            child._hlines = self._hlines
+            child._vlines = self._vlines
+            child._flags = self._flags
+            child._ylim_v, child._xlim_v = self._ylim_v, self._xlim_v
+            child._force.update(force)
+            children.append(child)
+
+        # dry pass: union the domains every panel will be held to
+        ylo = yhi = xlo = xhi = None
+        xcats, legend_union = [], []
+        for child in children:
+            spec, series = child._prepare(theme)
+            sy, sx = spec["sy"], spec["sx"]
+            ylo = sy.lo if ylo is None else min(ylo, sy.lo)
+            yhi = sy.hi if yhi is None else max(yhi, sy.hi)
+            if isinstance(sx, Band):
+                for c in sx.categories:
+                    if c not in xcats:
+                        xcats.append(c)
+            elif not isinstance(sx, Band) and hasattr(sx, "lo"):
+                xlo = sx.lo if xlo is None else min(xlo, sx.lo)
+                xhi = sx.hi if xhi is None else max(xhi, sx.hi)
+            for s in series:
+                if all(s["name"] != n for n, _c in legend_union):
+                    legend_union.append((s["name"], s["color"]))
+        for child in children:
+            child._force.update({"ylo": ylo, "yhi": yhi})
+            if xcats:
+                child._force["xcats"] = xcats
+            elif xlo is not None and self.kind != "hist":
+                child._force.update({"xlo": xlo, "xhi": xhi})
+
+        # grid arithmetic
+        n = len(children)
+        cols = self._opts.get("cols") or (1 if n == 1 else 2 if n <= 4 else 3)
+        cols = max(1, min(int(cols), n))
+        rows = math.ceil(n / cols)
+        w, h = self._w, self._h
+        top = 12.0
+        if self._title:
+            top += theme.size_title + 8
+        if self._subtitle:
+            top += theme.size_subtitle + 6
+        items = legend_union if len(legend_union) >= 2 \
+            and self._legend != "none" else []
+        legend_rows = _wrap_legend(items, theme, w - 28) if items else []
+        top += len(legend_rows) * 19 + (4 if legend_rows else 2)
+        bottom = (theme.size_caption + 14) if self._caption else 8
+        gap = 12.0
+        pw = (w - 20 - (cols - 1) * gap) / cols
+        ph = (h - top - bottom - (rows - 1) * gap) / rows
+        if pw < 160 or ph < 130:
+            raise ValueError(
+                "a %dx%d facet grid doesn't fit in %gx%g — make the figure "
+                "bigger with .size() or reduce cols=" % (rows, cols, w, h))
+
+        root = document(w, h, theme.surface)
+        root.attrs["font-family"] = theme.font
+        if self._title:
+            root.add(El("title", [self._title]))
+        self._draw_header(root, theme, legend_rows)
+        for i, child in enumerate(children):
+            child.size(pw, ph)
+            panel = child._build()
+            r, c = divmod(i, cols)
+            panel.attrs["x"] = 10 + c * (pw + gap)
+            panel.attrs["y"] = top + r * (ph + gap)
+            root.add(panel)
+            for note in child.notes:
+                if note not in self.notes:
+                    self.notes.append(note)
+        if self._caption:
+            root.add(El("text", [self._caption], x=14, y=h - 10,
+                        font_size=theme.size_caption, fill=theme.muted))
+        return root
+
+
 # -- helpers ---------------------------------------------------------------------
+
+
+def _as_number(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        parsed = parse_number(value)
+        return parsed[0] if parsed else None
+    return None
 
 
 class Index:

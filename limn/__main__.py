@@ -6,11 +6,11 @@ Chart kind defaults to ``auto``: limn looks at the columns and picks.
 import argparse
 import sys
 
-from . import line, area, bar, scatter, hist, heatmap, plot, __version__
+from . import line, area, bar, scatter, hist, box, heatmap, plot, __version__
 from .ingest import IngestError
 
 _KINDS = {"auto": plot, "line": line, "area": area, "bar": bar,
-          "scatter": scatter, "hist": hist}
+          "scatter": scatter, "hist": hist, "box": box}
 
 
 def main(argv=None):
@@ -24,6 +24,7 @@ def main(argv=None):
     p.add_argument("-y", default=None, action="append",
                    help="y column (repeatable)")
     p.add_argument("--by", default=None, help="series column")
+    p.add_argument("--facet", default=None, help="small-multiples column")
     p.add_argument("--title", default=None)
     p.add_argument("--theme", default="paper")
     p.add_argument("--version", action="version",
@@ -31,8 +32,13 @@ def main(argv=None):
     ns = p.parse_args(argv)
     data = sys.stdin.read() if ns.data == "-" else ns.data
     y = ns.y if ns.y is None or len(ns.y) > 1 else ns.y[0]
+    kwargs = dict(x=ns.x, y=y, title=ns.title)
+    if ns.kind != "box":
+        kwargs["by"] = ns.by
+        if ns.kind != "auto" and ns.facet:
+            kwargs["facet"] = ns.facet
     try:
-        fig = _KINDS[ns.kind](data, x=ns.x, y=y, by=ns.by, title=ns.title)
+        fig = _KINDS[ns.kind](data, **kwargs)
         fig.theme(ns.theme).save(ns.output)
     except (IngestError, ValueError, OSError) as exc:
         print("limn: %s" % exc, file=sys.stderr)

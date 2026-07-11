@@ -12,17 +12,19 @@ label measured so nothing ever clips.
     import limn
     limn.line("sales.csv", by="region", title="Revenue").save("out.svg")
 
-Six forms: line, area, bar, scatter, hist, heatmap — plus plot(), which
-looks at the data and picks one.  Figures render inline in notebooks.
+Seven forms: line, area, bar, scatter, hist, box, heatmap — plus
+plot(), which looks at the data and picks one.  Annotations, small
+multiples, and log axes are one call each.  Figures render inline in
+notebooks.
 """
 
-from .api import line, area, bar, scatter, hist, heatmap, plot
+from .api import line, area, bar, scatter, hist, box, heatmap, plot
 from .figure import Figure
 from .ingest import ingest, IngestError
 from .theme import THEMES, Theme
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
-__all__ = ["line", "area", "bar", "scatter", "hist", "heatmap", "plot",
-           "Figure", "ingest", "IngestError", "THEMES", "Theme",
+__all__ = ["line", "area", "bar", "scatter", "hist", "box", "heatmap",
+           "plot", "Figure", "ingest", "IngestError", "THEMES", "Theme",
            "__version__"]

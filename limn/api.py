@@ -1,4 +1,4 @@
-"""The public face: six chart constructors and one that decides for you.
+"""The public face: seven chart constructors and one that decides for you.
 
 Every function takes *data* in any ingestible shape (CSV path or text,
 list of dicts, dict of lists, DataFrame, plain sequence — see ingest.py)
@@ -7,6 +7,15 @@ chain style calls on and save::
 
     limn.line("sales.csv", x="month", y="revenue", by="region",
               title="Revenue by region").save("revenue.svg")
+
+Shared optional parameters:
+
+- ``by`` — a category column that splits the data into colored series.
+- ``facet`` — a category column that splits the chart into small
+  multiples with **shared** scales and colors; ``cols=`` sets the grid
+  width.
+- ``color`` — override series colors: one hex string, a list, or a
+  ``{series_name: hex}`` dict.
 """
 
 from .figure import Figure
@@ -14,38 +23,58 @@ from .ingest import ingest, NUMBER, TEMPORAL, CATEGORY
 
 
 def line(data, x=None, y=None, by=None, title=None, markers=True,
-         ylog=False):
-    """A line chart.  Missing values become visible gaps, never lies."""
+         ylog=False, xlog=False, color=None, dash=None, facet=None,
+         cols=None):
+    """A line chart.  Missing values become visible gaps, never lies.
+
+    *dash* names series to draw dashed (a list of names, or one name) —
+    useful for forecasts and baselines.  Series beyond ~3000 points are
+    min-max decimated to what pixels can show; the shape is preserved.
+    """
     return Figure("line", data, x=x, y=y, by=by, title=title,
-                  markers=markers, ylog=ylog)
+                  markers=markers, ylog=ylog, xlog=xlog, color=color,
+                  dash=dash, facet=facet, cols=cols)
 
 
-def area(data, x=None, y=None, by=None, title=None, stack=True):
+def area(data, x=None, y=None, by=None, title=None, stack=True,
+         color=None, facet=None, cols=None):
     """An area chart; multiple series stack by default (set stack=False
     for overlapping washes)."""
-    return Figure("area", data, x=x, y=y, by=by, title=title, stack=stack)
+    return Figure("area", data, x=x, y=y, by=by, title=title, stack=stack,
+                  color=color, facet=facet, cols=cols)
 
 
 def bar(data, x=None, y=None, by=None, title=None, stack=False,
-        horizontal=False, sort=None, labels=False):
-    """A bar chart.  *by* groups (or stacks, with stack=True); *sort* is
-    None (data order), 'x', 'y', or '-y'; *labels* puts values at the
-    bar ends."""
+        horizontal=False, sort=None, labels=False, color=None, facet=None,
+        cols=None):
+    """A bar chart.  *by* (or several y columns) groups — or stacks, with
+    stack=True; *sort* is None (data order), 'x', 'y', or '-y'; *labels*
+    puts values at the bar ends."""
     return Figure("bar", data, x=x, y=y, by=by, title=title, stack=stack,
-                  horizontal=horizontal, sort=sort, labels=labels)
+                  horizontal=horizontal, sort=sort, labels=labels,
+                  color=color, facet=facet, cols=cols)
 
 
 def scatter(data, x=None, y=None, by=None, size=None, title=None,
-            ylog=False):
+            ylog=False, xlog=False, color=None, facet=None, cols=None):
     """A scatter plot; *by* colors by category, *size* scales dot area
-    by a numeric column."""
+    by a numeric column, *xlog*/*ylog* switch to log axes."""
     return Figure("scatter", data, x=x, y=y, by=by, size=size, title=title,
-                  ylog=ylog)
+                  ylog=ylog, xlog=xlog, color=color, facet=facet, cols=cols)
 
 
-def hist(data, x=None, bins="auto", title=None):
-    """A histogram with Freedman–Diaconis binning (or give *bins* an int)."""
-    return Figure("hist", data, x=x, title=title, bins=bins)
+def hist(data, x=None, bins="auto", title=None, color=None, facet=None,
+         cols=None):
+    """A histogram with Freedman–Diaconis binning (or give *bins* an int).
+    Faceted histograms share their bin edges, so panels are comparable."""
+    return Figure("hist", data, x=x, title=title, bins=bins, color=color,
+                  facet=facet, cols=cols)
+
+
+def box(data, x=None, y=None, title=None, color=None):
+    """Box plots: quartile boxes, median, Tukey whiskers (1.5·IQR), and
+    outlier dots — one box per category in *x* (or one overall)."""
+    return Figure("box", data, x=x, y=y, title=title, color=color)
 
 
 def heatmap(data, title=None):

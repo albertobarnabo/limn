@@ -69,10 +69,13 @@ Three specific grievances with the status quo, answered:
 ## Install
 
 ```
-pip install .        # from a checkout; there are no dependencies to pull
+pip install limn-charts              # imports as plain `limn`; zero deps
+pip install limn-charts[png]         # + optional PNG export via cairosvg
 ```
 
-## The six forms (and the seventh)
+(The PyPI name `limn` was already taken; the import is unaffected.)
+
+## The seven forms (and the eighth)
 
 ```python
 limn.line(data, x=…, y=…, by=…)       # gaps for missing, direct end labels
@@ -80,9 +83,27 @@ limn.area(data, …)                    # stacks by default, surface gaps
 limn.bar(data, …, stack=, horizontal=, sort="-y", labels=True)
 limn.scatter(data, x=…, y=…, by=…, size=…)
 limn.hist(values, bins="auto")        # Freedman–Diaconis
+limn.box(data, x=…, y=…)              # quartiles, whiskers, outliers
 limn.heatmap(matrix_or_table)         # annotated cells, ramp legend
 limn.plot(data)                       # looks at the columns, picks a form
 ```
+
+Charts argue as well as show — reference lines, callouts, and small
+multiples are one call each:
+
+```python
+(limn.line(data, x="week", y="uptime")
+     .hline(99, "SLA target")             # dashed reference on the value axis
+     .vline("2026-03-15", "failover")     # event marker; takes a date string
+     .flag("2026-03-22", 96.7, "the bad Tuesday"))   # point callout
+
+limn.line(rows, x="month", y="signups", facet="city", cols=2)
+#   ^ small multiples: panels share scales, colors, and bins — always
+```
+
+Log axes (`xlog=`, `ylog=`), fixed ranges (`.ylim()`), per-series colors
+and dashes (`color=`, `dash=`), and automatic decimation for
+100k-point series round out v1.1 — see the [docs](docs/).
 
 Every constructor accepts the same shapes: a CSV path, CSV/TSV text, a
 list of dicts, a dict of lists, a plain sequence, a generator, or any
@@ -156,13 +177,22 @@ solid gridlines, a legend whenever there are two or more series, and text
 that never wears a series color. Two themes ship — `paper` and `dusk` —
 and a custom `Theme` is a plain object of named tokens.
 
+## Documentation
+
+- [Quickstart](docs/quickstart.md) — install to first chart in a minute
+- [The chart forms](docs/charts.md) — all eight, with their options
+- [How ingestion thinks](docs/data.md) — the parsing rules, in full
+- [Styling & annotations](docs/styling.md) — themes, references, facets
+- [API reference](docs/api.md) — every public name, every error
+
 ## Honest limitations
 
-- **Static SVG only.** No interactivity, no tooltips, no PNG. SVG opens
-  everywhere, embeds in HTML/GitHub/docs, and prints beautifully; if you
-  need hover, you need a different (heavier) tool.
-- **Six chart forms.** No 3D, no polar, no candlesticks, no maps. Depth
-  over breadth.
+- **Static output.** No interactivity, no tooltips. SVG opens
+  everywhere, embeds in HTML/GitHub/docs, and prints beautifully; PNG is
+  available behind the optional `[png]` extra. If you need hover, you
+  need a different (heavier) tool.
+- **Eight chart forms.** No 3D, no polar, no candlesticks, no maps.
+  Depth over breadth.
 - **Text measurement is metric-table-based** (embedded Helvetica AFM
   widths + 6% safety), not a font engine. On unusual system fonts, layout
   is conservative rather than exact.
@@ -173,7 +203,7 @@ and a custom `Theme` is a plain object of named tokens.
 ## Development
 
 ```
-python3 -m unittest            # 128 tests, < 1s, no fixtures, no network
+python3 -m unittest            # 155 tests, < 1s, no fixtures, no network
 python3 examples/gallery.py    # rebuild the gallery
 ```
 

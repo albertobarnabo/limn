@@ -3,8 +3,8 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "limn"
-version = "1.0.0"
+name = "limn-charts"
+version = "1.1.0"
 description = "Charts for people who have real data, not clean data — zero-dependency SVG plotting with smart ingestion."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -21,8 +21,15 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Visualization",
 ]
 
+[project.optional-dependencies]
+png = ["cairosvg>=2.5"]
+
 [project.urls]
+Homepage = "https://github.com/albertobarnabo/limn"
+Documentation = "https://github.com/albertobarnabo/limn/tree/main/docs"
 Gallery = "https://github.com/albertobarnabo/limn/tree/main/gallery"
+Changelog = "https://github.com/albertobarnabo/limn/blob/main/CHANGELOG.md"
+Issues = "https://github.com/albertobarnabo/limn/issues"
 
 [tool.setuptools]
 packages = ["limn"]

@@ -125,6 +125,49 @@ def figures():
         title="Merged pull requests by team and weekday",
     ).caption("simulated data")
 
+    # -- annotations: the chart that tells you what to see ---------------------------
+    weeks = ["2026-%02d-%02d" % (1 + (i * 7 // 31) % 6, 1 + (i * 7) % 28)
+             for i in range(22)]
+    weeks = sorted(set(weeks))
+    uptime = [97.2 + 0.14 * i + (0.9 if i > 8 else 0) - (2.8 if i == 11 else 0)
+              for i in range(len(weeks))]
+    yield "annotated", (limn.line(
+        {"week": weeks, "uptime": ["%.1f%%" % u for u in uptime]},
+        x="week", y="uptime", title="Service uptime against the SLA")
+        .hline(99, "SLA target")
+        .vline("2026-03-15", "failover drill")
+        .flag(weeks[11], uptime[11], "the bad Tuesday")
+        .subtitle("reference lines and a callout — .hline() .vline() .flag()")
+        .caption("simulated data"))
+
+    # -- small multiples --------------------------------------------------------------
+    rows = []
+    for name, base, slope in (("Berlin", 210, 6), ("Madrid", 150, 9),
+                              ("Warsaw", 90, 12), ("Lisbon", 60, 4)):
+        for i in range(16):
+            rows.append({"month": "202%d-%02d" % (4 + (i + 2) // 12,
+                                                  (i + 2) % 12 + 1),
+                         "signups": base + slope * i
+                         + (18 * math.sin(i / 2 + base)),
+                         "city": name})
+    yield "facets", (limn.line(
+        rows, x="month", y="signups", facet="city", cols=2,
+        title="Signups by city — one honest y axis")
+        .subtitle("small multiples share scales; a private axis per panel would lie")
+        .size(680, 520).caption("simulated data"))
+
+    # -- box plots ---------------------------------------------------------------------
+    random.seed(7)
+    teams = {"checkout": (140, 30), "search": (90, 18),
+             "profile": (60, 9), "feed": (200, 80)}
+    rows = [{"endpoint": t, "ms": max(5, random.gauss(mu, sd))}
+            for t, (mu, sd) in teams.items() for _ in range(120)]
+    yield "box_latency", (limn.box(
+        rows, x="endpoint", y="ms",
+        title="Response time spread by endpoint, ms")
+        .subtitle("quartile boxes, Tukey whiskers, outliers as dots")
+        .caption("simulated data"))
+
     # -- the European CSV -----------------------------------------------------------
     yield "euro_csv", limn.line(
         "datum;temperatur\n01.03.2026;7,4\n08.03.2026;9,1\n15.03.2026;8,2\n"

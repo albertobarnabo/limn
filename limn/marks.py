@@ -45,12 +45,48 @@ def draw_lines(g, series, to_x, to_y, theme, markers):
             continue
         g.add(El("path", d=polyline_path(pts), fill="none",
                  stroke=s["color"], stroke_width=theme.line_width,
+                 stroke_dasharray="7 4" if s.get("dash") else None,
                  stroke_linejoin="round", stroke_linecap="round"))
         if markers and len(drawable) <= 30:
             for x, y in drawable:
                 g.add(El("circle", cx=x, cy=y, r=theme.marker_radius - 0.5,
                          fill=s["color"], stroke=theme.surface,
                          stroke_width=2))
+
+
+def decimate(points, to_x, budget):
+    """Min-max decimation: shrink a huge series to what pixels can show.
+
+    Points are bucketed by rounded x pixel; each bucket keeps its first,
+    lowest, highest, and last point, in x order — the rendered path is
+    visually identical to the full one.  Gaps (None) survive untouched.
+    """
+    if len(points) <= budget:
+        return points
+    out, bucket, key = [], [], None
+
+    def flush():
+        if not bucket:
+            return
+        keep = {0, len(bucket) - 1,
+                min(range(len(bucket)), key=lambda i: bucket[i][1]),
+                max(range(len(bucket)), key=lambda i: bucket[i][1])}
+        out.extend(bucket[i] for i in sorted(keep))
+
+    for p in points:
+        x, y = p
+        if x is None or y is None:
+            flush()
+            bucket, key = [], None
+            out.append(p)                      # the gap itself survives
+            continue
+        k = int(to_x(x))
+        if k != key:
+            flush()
+            bucket, key = [], k
+        bucket.append(p)
+    flush()
+    return out
 
 
 # -- areas ---------------------------------------------------------------------
@@ -240,6 +276,57 @@ def draw_scatter(g, series, to_x, to_y, theme, radius_of, n_total):
             g.add(El("circle", cx=to_x(x), cy=to_y(y), r=radius_of(extra),
                      fill=s["color"], fill_opacity=opacity,
                      stroke=theme.surface, stroke_width=2))
+
+
+# -- box plots -------------------------------------------------------------------
+
+
+def box_stats(values):
+    """Five-number summary with Tukey whiskers (1.5·IQR) and outliers."""
+    vals = sorted(values)
+
+    def q(p):
+        pos = (len(vals) - 1) * p
+        i, frac = int(pos), pos - int(pos)
+        if i + 1 >= len(vals):
+            return vals[-1]
+        return vals[i] * (1 - frac) + vals[i + 1] * frac
+
+    q1, med, q3 = q(0.25), q(0.5), q(0.75)
+    iqr = q3 - q1
+    lo_fence, hi_fence = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+    inside = [v for v in vals if lo_fence <= v <= hi_fence]
+    lo_wh = inside[0] if inside else q1
+    hi_wh = inside[-1] if inside else q3
+    outliers = [v for v in vals if v < lo_fence or v > hi_fence]
+    return {"q1": q1, "med": med, "q3": q3,
+            "lo": lo_wh, "hi": hi_wh, "outliers": outliers}
+
+
+def draw_boxes(g, stats, band, to_v, centers, theme, color):
+    """One box per category: quartile box, median, whiskers, outlier dots."""
+    w = min(38.0, band._bw)
+    for cat, s in stats:
+        cx = centers(cat)
+        x = cx - w / 2
+        top, bottom = to_v(s["q3"]), to_v(s["q1"])
+        g.add(El("rect", x=x, y=min(top, bottom), width=w,
+                 height=max(abs(bottom - top), 1), rx=2,
+                 fill=color, fill_opacity=0.18,
+                 stroke=color, stroke_width=1.5))
+        med_y = to_v(s["med"])
+        g.add(El("line", x1=x, x2=x + w, y1=med_y, y2=med_y,
+                 stroke=color, stroke_width=2.5))
+        for value, box_edge in ((s["hi"], min(top, bottom)),
+                                (s["lo"], max(top, bottom))):
+            wy = to_v(value)
+            g.add(El("line", x1=cx, x2=cx, y1=box_edge, y2=wy,
+                     stroke=color, stroke_width=1.5))
+            g.add(El("line", x1=cx - 5, x2=cx + 5, y1=wy, y2=wy,
+                     stroke=color, stroke_width=1.5))
+        for v in s["outliers"]:
+            g.add(El("circle", cx=cx, cy=to_v(v), r=2.5, fill=color,
+                     fill_opacity=0.6))
 
 
 # -- heatmap ---------------------------------------------------------------------
