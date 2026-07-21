@@ -55,6 +55,9 @@ def _density_max(k, m):
     return 2 - (k - 1) / (m - 1) if k >= m else 1.0
 
 
+_HUGE = 1e100   # beyond this the optimizer's squared terms overflow
+
+
 def linear_ticks(dmin, dmax, target=5):
     """Extended Wilkinson: optimal loose labeling of [dmin, dmax].
 
@@ -64,11 +67,15 @@ def linear_ticks(dmin, dmax, target=5):
     """
     if math.isnan(dmin) or math.isnan(dmax):
         return [0.0, 1.0]
+    if math.isinf(dmin) or math.isinf(dmax):
+        return [0.0, 1.0]
     if dmin > dmax:
         dmin, dmax = dmax, dmin
     if dmax - dmin < _EPS * max(abs(dmin), abs(dmax), 1.0):
         pad = 1.0 if dmin == 0 else abs(dmin) / 2
         dmin, dmax = dmin - pad, dmax + pad
+    if max(abs(dmin), abs(dmax)) > _HUGE or (dmax - dmin) > _HUGE:
+        return _decade_ticks(dmin, dmax, target)   # optimizer would overflow
 
     best = None       # (score, lmin, lstep, k)
     for j in range(1, 3):
@@ -110,9 +117,33 @@ def linear_ticks(dmin, dmax, target=5):
     if best is None:  # pathological ranges: fall back to naive thirds
         step = (dmax - dmin) / 2
         return [dmin, dmin + step, dmax]
+    if not all(map(math.isfinite, (best[1], best[2]))):
+        return _decade_ticks(dmin, dmax, target)
     _score, lmin, lstep, k = best
     ticks = [lmin + i * lstep for i in range(k)]
     return [0.0 if abs(t) < lstep * _EPS else t for t in ticks]
+
+
+def _decade_ticks(dmin, dmax, target):
+    """Coarse power-of-ten ticks for domains too wide for the optimizer.
+
+    Astronomical or degenerate ranges (1e160, 1e-300 … 1e300) would make the
+    Wilkinson score's squared terms overflow, so they get a plain,
+    always-finite ladder instead of a crash.
+    """
+    span = dmax - dmin
+    if span <= 0 or not math.isfinite(span):
+        return [dmin, dmin + 1.0]
+    step = 10.0 ** math.ceil(math.log10(span / max(target - 1, 1)))
+    if not math.isfinite(step) or step <= 0:
+        return [dmin, dmax]
+    lo = math.floor(dmin / step) * step
+    ticks, v, guard = [], lo, 0
+    while v <= dmax + step * 0.5 and guard < 64:
+        ticks.append(v)
+        v += step
+        guard += 1
+    return ticks if len(ticks) >= 2 else [dmin, dmax]
 
 
 # -- time ---------------------------------------------------------------------
@@ -242,6 +273,20 @@ def axis_formatter(ticks, percent=False, currency=None):
     """
     finite = [t for t in ticks if not math.isnan(t)]
     top = max((abs(t) for t in finite), default=1.0)
+
+    # Past the suffix ladder (or far below it) a decimal label becomes a
+    # wall of zeros — 2e160 would render as 149 digits and blow the margin
+    # calculation out of the figure.  Those axes get scientific notation.
+    if top >= 1e15 or (0 < top < 1e-4):
+        def sci(v):
+            if math.isnan(v):
+                return ""
+            out = "0" if v == 0 else "%.3g" % v
+            if currency:
+                out = (currency + out) if v >= 0 else "-" + currency + out[1:]
+            return out + ("%" if percent else "")
+        return sci
+
     scale, suffix = 1.0, ""
     for cut, suf in _SUFFIXES:
         if top >= cut:
@@ -253,6 +298,22 @@ def axis_formatter(ticks, percent=False, currency=None):
     decimals = max(0, -int(math.floor(math.log10(scaled_step) + 1e-9))) \
         if scaled_step > 0 else 0
     decimals = min(decimals, 6)
+
+    # The step alone doesn't decide legibility.  Two ways it misleads:
+    # half-integer ticks (0.5, 1.5, 2.5 …) have a step of 1 and would print
+    # "0, 2, 2, 4" — duplicates, each off by half a step; and a 2,500 step
+    # under k-scaling would print "2k" on a gridline that sits at 2,500.
+    # So widen the precision until every label is *distinct* and *faithful*:
+    # it must read back to the value its gridline actually stands on.
+    tolerance = step * 0.02
+    while decimals < 6:
+        rendered = ["{:,.{d}f}".format(t / scale, d=decimals) for t in finite]
+        distinct = len(set(rendered)) == len(rendered)
+        faithful = all(abs(float(r.replace(",", "")) * scale - t) <= tolerance
+                       for r, t in zip(rendered, finite))
+        if distinct and faithful:
+            break
+        decimals += 1
 
     def fmt(v):
         if math.isnan(v):

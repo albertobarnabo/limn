@@ -27,10 +27,15 @@ for headerless data).
 `stack=False` → overlapping washes. Stacked negatives fall back to
 washes, with a note.
 
-### `limn.bar(data, x=None, y=None, by=None, title=None, stack=False, horizontal=False, sort=None, labels=False, color=None, facet=None, cols=None)`
+### `limn.bar(data, x=None, y=None, by=None, title=None, stack=False, horizontal=False, sort=None, labels=False, color=None, facet=None, cols=None, agg="sum", ylog=False)`
 
-`sort`: `None` · `"x"` · `"y"` · `"-y"`. `labels=True` → values at bar
-ends. The value axis always includes zero.
+`sort`: `None` · `"x"` · `"-x"` · `"y"` · `"-y"` — ranked on per-category
+totals across *all* series, so a stacked chart sorts by its bars.
+`labels=True` → values at bar ends (colliding labels are dropped, not
+overprinted). `agg` combines repeated categories: `"sum"` (default),
+`"mean"`, `"max"`, `"min"`, `"count"`, `"first"`, `"last"`. The value axis
+includes zero unless you override it with `.ylim()`, which drops the
+baseline and warns.
 
 ### `limn.scatter(data, x=None, y=None, by=None, size=None, title=None, ylog=False, xlog=False, color=None, facet=None, cols=None)`
 
@@ -41,7 +46,7 @@ ends. The value axis always includes zero.
 `bins`: `"auto"` (Freedman–Diaconis, Sturges fallback) or an int.
 Faceted histograms share bin edges.
 
-### `limn.box(data, x=None, y=None, title=None, color=None)`
+### `limn.box(data, x=None, y=None, title=None, color=None, facet=None, cols=None)`
 
 Quartiles, median, Tukey whiskers (1.5·IQR), outlier dots. One box per
 `x` category, or one overall.
@@ -70,10 +75,10 @@ All methods return `self` (chainable) except the output methods.
 | `.hline(y, label=None, color=None)` | dashed reference on the value axis |
 | `.vline(x, label=None, color=None)` | dashed reference at an x position |
 | `.flag(x, y, text)` | ringed-dot callout with a bold label |
-| `.ylim(lo, hi)` `.xlim(lo, hi)` | fix an axis range; marks beyond it clip |
+| `.ylim(lo, hi)` `.xlim(lo, hi)` | fix an axis range **exactly**; marks beyond it clip and limn reports how many. `xlim` takes dates on a time axis |
 | `.note(s)` | append to the figure's notes |
-| `.to_svg()` | the SVG document as a string |
-| `.save(path)` | write `.svg` (or `.png` with the `[png]` extra); prints notes to stderr once |
+| `.to_svg()` | the SVG document as a string; also drains notes to stderr |
+| `.save(path)` | write `.svg`, `.svgz`, or `.png` (with the `[png]` extra). Atomic — a failed render never truncates an existing file. Unknown extensions raise |
 | `.notes` | list of everything limn decided or skipped |
 | `._repr_svg_()` | Jupyter inline rendering (automatic) |
 
@@ -81,7 +86,7 @@ All methods return `self` (chainable) except the output methods.
 
 | name | what |
 |---|---|
-| `limn.ingest(data)` | the parser on its own → `Table` with typed `.columns` and `.notes` |
+| `limn.ingest(data, dtypes=None)` | the parser on its own → `Table` with typed `.columns` and `.notes`; `dtypes={"zip": "category"}` overrides the classifier |
 | `limn.IngestError` | raised for structural problems (subclass of `ValueError`) |
 | `limn.THEMES` | `{"paper": Theme, "dusk": Theme}` |
 | `limn.Theme` | plain token bag; copy one from `THEMES` and override |
@@ -96,6 +101,9 @@ All methods return `self` (chainable) except the output methods.
 | figure too small for its labels | `ValueError` naming `.size()` |
 | facet grid that doesn't fit | `ValueError` naming `.size()` and `cols=` |
 | unknown theme | `ValueError` listing the themes |
+| `sort=`, `agg=`, `legend()` given an unknown value | `ValueError` listing the valid ones |
+| `color=` given something that isn't a color | `ValueError` |
+| `color=`/`dash=` naming a series that isn't there | `IngestError` listing the series |
 | `.png` without cairosvg | `RuntimeError` naming the extra |
 
 Everything about *values* — unparseable cells, missing data, references
@@ -104,10 +112,12 @@ outside range — is a note, never an exception.
 ## Command line
 
 ```
-python -m limn DATA [-o OUT.svg] [-k auto|line|area|bar|scatter|hist|box]
-                    [-x COL] [-y COL]... [--by COL] [--facet COL]
-                    [--title T] [--theme paper|dusk]
+limn DATA [-o OUT.svg|.svgz|.png] [--size WxH]
+          [-k auto|line|area|bar|scatter|hist|box|heatmap]
+          [-x COL] [-y COL]... [--by COL] [--facet COL]
+          [--title T] [--theme paper|dusk]
 ```
 
-`DATA` is a file or `-` for stdin. Exit code 1 with a `limn:` message on
-structural errors.
+(`python -m limn …` works identically.) `DATA` is a file or `-` for stdin.
+Exit 1 with a `limn:` message on structural errors; exit 2 when an option
+doesn't apply to the chosen kind — it is refused, never ignored.

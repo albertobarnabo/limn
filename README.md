@@ -17,8 +17,8 @@ limn.line("sales.csv", by="region", title="Revenue by region").save("out.svg")
 ```
 
 <picture>
-  <source srcset="gallery/messy_csv_dusk.svg" media="(prefers-color-scheme: dark)">
-  <img src="gallery/messy_csv_paper.svg" alt="A line chart made directly from a messy finance CSV" width="680">
+  <source srcset="https://raw.githubusercontent.com/albertobarnabo/limn/main/gallery/messy_csv_dusk.svg" media="(prefers-color-scheme: dark)">
+  <img src="https://raw.githubusercontent.com/albertobarnabo/limn/main/gallery/messy_csv_paper.svg" alt="A line chart made directly from a messy finance CSV" width="680">
 </picture>
 
 The input for that chart, verbatim — quotes, dollar signs, thousands
@@ -123,27 +123,28 @@ Everything returns a `Figure`:
 Figures display inline in Jupyter (`_repr_svg_`). There's a CLI too:
 
 ```
-python -m limn data.csv -o chart.svg --title "Whatever the file says"
+limn data.csv -o chart.svg --title "Whatever the file says"
+limn data.csv -k bar -x team -y points --facet region --size 900x520
 ```
 
 ## The gallery
 
 Built by `python3 examples/gallery.py`; every image is the library's
 verbatim output. Start with
-[gallery/index.html](gallery/index.html), or the dusk side at
-[gallery/dusk.html](gallery/dusk.html).
+[gallery/index.html](https://github.com/albertobarnabo/limn/blob/main/gallery/index.html), or the dusk side at
+[gallery/dusk.html](https://github.com/albertobarnabo/limn/blob/main/gallery/dusk.html).
 
 <picture>
-  <source srcset="gallery/line_series_dusk.svg" media="(prefers-color-scheme: dark)">
-  <img src="gallery/line_series_paper.svg" alt="Multi-series line chart with a gap" width="680">
+  <source srcset="https://raw.githubusercontent.com/albertobarnabo/limn/main/gallery/line_series_dusk.svg" media="(prefers-color-scheme: dark)">
+  <img src="https://raw.githubusercontent.com/albertobarnabo/limn/main/gallery/line_series_paper.svg" alt="Multi-series line chart with a gap" width="680">
 </picture>
 <picture>
-  <source srcset="gallery/bar_sorted_dusk.svg" media="(prefers-color-scheme: dark)">
-  <img src="gallery/bar_sorted_paper.svg" alt="Sorted horizontal bars with percent labels" width="680">
+  <source srcset="https://raw.githubusercontent.com/albertobarnabo/limn/main/gallery/bar_sorted_dusk.svg" media="(prefers-color-scheme: dark)">
+  <img src="https://raw.githubusercontent.com/albertobarnabo/limn/main/gallery/bar_sorted_paper.svg" alt="Sorted horizontal bars with percent labels" width="680">
 </picture>
 <picture>
-  <source srcset="gallery/heatmap_commits_dusk.svg" media="(prefers-color-scheme: dark)">
-  <img src="gallery/heatmap_commits_paper.svg" alt="Annotated heatmap" width="680">
+  <source srcset="https://raw.githubusercontent.com/albertobarnabo/limn/main/gallery/heatmap_commits_dusk.svg" media="(prefers-color-scheme: dark)">
+  <img src="https://raw.githubusercontent.com/albertobarnabo/limn/main/gallery/heatmap_commits_paper.svg" alt="Annotated heatmap" width="680">
 </picture>
 
 ## What the ingestion actually does
@@ -153,7 +154,10 @@ verbatim output. Start with
 | `"$1,204,500"` | 1204500.0, axis formatted `$1.2M` |
 | `"18.6%"` | 18.6, axis formatted `18.6%` |
 | `"1.234,56"` / `"1 234,56"` | 1234.56 — European style, detected per column |
-| `"(2,400)"` | −2400.0 (accounting negative) |
+| `"(2,400)"`, `"$(2,400)"` | −2400.0 (accounting negatives, Excel's included) |
+| `"1'234'567"` | 1234567.0 (Swiss grouping) |
+| `"02134"` | stays a zip code — identifier columns keep their leading zeros |
+| JSON / NDJSON | parsed as records, not mangled as CSV |
 | `"3.2M"`, `"150k"`, `"1.4bn"` | 3.2e6, 150000, 1.4e9 |
 | `""`, `"N/A"`, `"null"`, `"—"`, `NaN` | missing — a gap, and a note |
 | `"Mar 3, 2026"`, `"2026-03-03"`, `"03.03.26"` | the same datetime |
@@ -167,23 +171,32 @@ notes are on `fig.notes` if you want them programmatically.
 
 ## Design system
 
-The default themes are the reference instance of a validated design
-system: an 8-slot categorical palette ordered to maximize worst-case
-adjacent color-vision-deficiency distance (light-mode worst pair ΔE 24.2
-under protanopia simulation, target ≥ 12), 2px lines with surface-ringed
-markers, bars capped at 24px with rounded data-ends and square baselines,
-2px *surface gaps* instead of outlines between stacked segments, hairline
-solid gridlines, a legend whenever there are two or more series, and text
-that never wears a series color. Two themes ship — `paper` and `dusk` —
-and a custom `Theme` is a plain object of named tokens.
+The two themes are the reference instance of a validated design system:
+2px lines with surface-ringed markers, bars capped at 24px with rounded
+data-ends and square baselines, 2px *surface gaps* instead of outlines,
+hairline solid gridlines, a legend whenever there are two or more series,
+and text that never wears a series color.
 
-## Documentation
+**The accessibility claim is computed, not asserted.**
+[`tools/cvd.py`](https://github.com/albertobarnabo/limn/blob/main/tools/cvd.py) simulates protanopia,
+deuteranopia and tritanopia (Viénot–Brettel–Mollon, in LMS cone space) and
+measures the **all-pairs** minimum distance — every pair of series a reader
+might compare, not just neighbours in the legend.
+[`tests/test_palette.py`](https://github.com/albertobarnabo/limn/blob/main/tests/test_palette.py) asserts the
+numbers below, so they cannot quietly rot:
 
-- [Quickstart](docs/quickstart.md) — install to first chart in a minute
-- [The chart forms](docs/charts.md) — all eight, with their options
-- [How ingestion thinks](docs/data.md) — the parsing rules, in full
-- [Styling & annotations](docs/styling.md) — themes, references, facets
-- [API reference](docs/api.md) — every public name, every error
+| | paper | dusk | Okabe-Ito (reference) |
+|---|---|---|---|
+| all-pairs min ΔE, normal/protan/deutan | **8.8** | **9.4** | 7.9 |
+| under tritanopia | 2.7 | 4.9 | 0.6 |
+| series slots below 3:1 contrast | 0 | 0 | 2 |
+| axis text vs WCAG AA | pass | pass | — |
+
+Two honest notes. **Tritanopia (~0.01% of people) is not solved by any
+eight-colour palette** — the field's reference set scores 0.6 there — so
+limn reports it rather than pretending. And past each theme's measured
+`safe_n`, color alone stops being enough: limn automatically dashes the
+extra line series and says so, rather than silently repeating a hue.
 
 ## Honest limitations
 
@@ -203,7 +216,7 @@ and a custom `Theme` is a plain object of named tokens.
 ## Development
 
 ```
-python3 -m unittest            # 155 tests, < 1s, no fixtures, no network
+python3 -m unittest            # 186 tests, < 1s, no fixtures, no network
 python3 examples/gallery.py    # rebuild the gallery
 ```
 

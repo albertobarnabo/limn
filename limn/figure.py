@@ -15,8 +15,11 @@ already names it.
 """
 
 import itertools
-import sys
 import math
+import os
+import re
+import sys
+from typing import Optional
 
 from .coerce import parse_number, parse_temporal
 from .ingest import ingest, IngestError, NUMBER, TEMPORAL, CATEGORY
@@ -64,92 +67,193 @@ class Figure:
         self._xlim_v = None
         self._force = {}      # facet machinery: shared domains & orders
         self._panel = False   # True when this figure is one facet panel
+        self._validate_opts()
+
+    SORTS = (None, "x", "y", "-y", "-x")
+    AGGS = ("sum", "mean", "max", "min", "count", "first", "last")
+
+    def _validate_opts(self):
+        """Refuse arguments limn would otherwise accept and quietly drop.
+
+        limn already names the alternatives when a *column* is missing;
+        an option typo deserves the same courtesy instead of a chart that
+        silently ignores what you asked for.
+        """
+        o = self._opts
+        sort = o.get("sort")
+        if sort not in self.SORTS:
+            raise ValueError("sort=%r — use one of: %s"
+                             % (sort, ", ".join(repr(s) for s in self.SORTS)))
+        agg = o.get("agg")
+        if agg is not None and agg not in self.AGGS:
+            raise ValueError("agg=%r — use one of: %s"
+                             % (agg, ", ".join(map(repr, self.AGGS))))
+        if o.get("cols") is not None and not self._facet:
+            self.notes.append("cols= only groups facet panels, and this "
+                              "chart has no facet= — ignored")
+        for key in ("color", "dash"):
+            self._validate_color_or_names(key, o.get(key))
+
+    def _validate_color_or_names(self, key, value):
+        if value is None:
+            return
+        colors = [value] if isinstance(value, str) else (
+            list(value.values()) if isinstance(value, dict) else list(value))
+        if key == "color":
+            for c in colors:
+                if not _is_color(c):
+                    raise ValueError(
+                        "color=%r is not a color — use '#rrggbb', "
+                        "'#rgb', or a CSS color name" % (c,))
+        if isinstance(value, dict):
+            self._series_selectors = list(value)
+        elif key == "dash":
+            self._series_selectors = ([value] if isinstance(value, str)
+                                      else list(value))
 
     # -- fluent style ------------------------------------------------------
 
-    def title(self, text):
+    def title(self, text: "Optional[str]") -> "Figure":
         self._title = text
         return self
 
-    def subtitle(self, text):
+    def subtitle(self, text: "Optional[str]") -> "Figure":
         self._subtitle = text
         return self
 
-    def caption(self, text):
+    def caption(self, text: "Optional[str]") -> "Figure":
         self._caption = text
         return self
 
-    def xlabel(self, text):
+    def xlabel(self, text: "Optional[str]") -> "Figure":
         self._xlabel = text
         return self
 
-    def ylabel(self, text):
+    def ylabel(self, text: "Optional[str]") -> "Figure":
         self._ylabel = text
         return self
 
-    def size(self, width, height):
+    def size(self, width: float, height: float) -> "Figure":
         self._w, self._h = float(width), float(height)
         return self
 
-    def theme(self, name):
+    def theme(self, name) -> "Figure":
         self._theme = name
         return self
 
-    def legend(self, mode):
+    LEGEND_MODES = ("auto", "none", "legend")
+
+    def legend(self, mode) -> "Figure":
         """'auto' (default), 'none', or 'legend' (suppress direct labels)."""
-        self._legend = mode
+        if mode is False:
+            mode = "none"
+        elif mode is True:
+            mode = "legend"
+        if not isinstance(mode, str) or mode.lower() not in self.LEGEND_MODES:
+            raise ValueError("legend(%r) — use one of: %s (or True/False)"
+                             % (mode, ", ".join(map(repr, self.LEGEND_MODES))))
+        self._legend = mode.lower()
         return self
 
-    def note(self, text):
+    def note(self, text: str) -> "Figure":
         self.notes.append(text)
         return self
 
     # -- annotations ---------------------------------------------------------
 
-    def hline(self, y, label=None, color=None):
+    def hline(self, y, label: "Optional[str]" = None,
+              color: "Optional[str]" = None) -> "Figure":
         """A horizontal reference line at value *y* (a target, a limit)."""
         self._hlines.append((y, label, color))
         return self
 
-    def vline(self, x, label=None, color=None):
+    def vline(self, x, label: "Optional[str]" = None,
+              color: "Optional[str]" = None) -> "Figure":
         """A vertical reference line at *x* — a date, number, or category
         (an event, a deadline, the moment everything changed)."""
         self._vlines.append((x, label, color))
         return self
 
-    def flag(self, x, y, text):
+    def flag(self, x, y, text: str) -> "Figure":
         """Call out one point: a ringed dot at (x, y) with a short label."""
         self._flags.append((x, y, text))
         return self
 
-    def ylim(self, lo, hi):
-        """Fix the value-axis range (overrides the computed domain)."""
-        self._ylim_v = (float(lo), float(hi))
+    def ylim(self, lo, hi) -> "Figure":
+        """Fix the value-axis range exactly.  Data outside it is clipped,
+        and limn says how much."""
+        a, b = _as_number(lo), _as_number(hi)
+        if a is None or b is None:
+            raise ValueError("ylim needs two numbers, got (%r, %r)" % (lo, hi))
+        if a > b:
+            self.notes.append("ylim(%g, %g) was given high-to-low — limn "
+                              "does not draw inverted axes, so it was read "
+                              "as ylim(%g, %g)" % (lo, hi, b, a))
+            a, b = b, a
+        self._ylim_v = (a, b)
         return self
 
-    def xlim(self, lo, hi):
-        """Fix a numeric x-axis range (overrides the computed domain)."""
-        self._xlim_v = (float(lo), float(hi))
+    def xlim(self, lo, hi) -> "Figure":
+        """Fix the x-axis range exactly — numbers on a numeric axis, dates
+        (or date strings) on a time axis."""
+        if _as_number(lo) is not None and _as_number(hi) is not None:
+            a, b = _as_number(lo), _as_number(hi)
+        else:
+            a, b = parse_temporal(lo), parse_temporal(hi)
+            if a is None or b is None:
+                raise ValueError(
+                    "xlim needs two numbers or two dates, got (%r, %r)"
+                    % (lo, hi))
+        if a > b:
+            self.notes.append("xlim was given high-to-low — limn does not "
+                              "draw inverted axes, so the two were swapped")
+            a, b = b, a
+        self._xlim_v = (a, b)
         return self
 
     # -- output ------------------------------------------------------------
 
-    def to_svg(self):
-        return to_string(self._build())
+    def to_svg(self) -> str:
+        svg = to_string(self._build())
+        self._flush_notes()
+        return svg
 
-    def save(self, path):
-        path = str(path)
-        if path.endswith(".png"):
-            self._save_png(path)
-        else:
-            if not path.endswith(".svg"):
-                path += ".svg"
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(self.to_svg())
+    def _flush_notes(self):
+        """Say once, out loud, everything limn had to decide.
+
+        Drained here rather than only in save() so notebook users — who
+        render through _repr_svg_ and are the likeliest to be exploring
+        messy data — actually get the diagnostics.
+        """
         if self.notes and not self._notes_shown:
             for n in self.notes:
                 print("limn · %s" % n, file=sys.stderr)
             self._notes_shown = True
+
+    def save(self, path) -> "Figure":
+        path = str(path)
+        suffix = os.path.splitext(path)[1].lower()
+        if suffix in (".png",):
+            self._save_png(path)
+        elif suffix in (".svgz",):
+            import gzip
+            with gzip.open(path, "wb") as f:
+                f.write(self.to_svg().encode("utf-8"))
+        else:
+            if suffix and suffix not in (".svg",):
+                raise ValueError(
+                    "limn writes .svg, .svgz and .png — not %r. Rename the "
+                    "target, or use to_svg() and convert it yourself."
+                    % suffix)
+            if not suffix:
+                path += ".svg"
+            # Render first: a failure must not truncate a good chart to 0 bytes
+            svg = self.to_svg()
+            tmp = path + ".limn-tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(svg)
+            os.replace(tmp, path)
+        self._flush_notes()
         return self
 
     def _save_png(self, path):
@@ -160,7 +264,15 @@ class Figure:
         except ImportError:
             raise RuntimeError(
                 "PNG export needs the optional rasterizer: pip install "
-                "cairosvg — or save as .svg, which needs nothing")
+                "'limn-charts[png]' — or save as .svg, which needs nothing")
+        except OSError as exc:
+            # cairosvg imports fine but its C library doesn't load — a
+            # different problem needing a different cure than "pip install"
+            raise RuntimeError(
+                "PNG export found cairosvg but could not load the system "
+                "cairo library (%s). Install it — macOS: brew install cairo, "
+                "Debian/Ubuntu: apt install libcairo2 — or save as .svg, "
+                "which needs nothing." % exc)
         cairosvg.svg2png(bytestring=self.to_svg().encode("utf-8"),
                          write_to=path, output_width=int(self._w * 2))
 
@@ -241,8 +353,53 @@ class Figure:
             "points": list(zip(xcol.values, y.values)),
         } for i, y in enumerate(ycols)]
 
+    def _enforce_secondary_encoding(self, series, theme):
+        """Past the palette's measured safe count, color stops being enough.
+
+        Eight categorical hues that stay distinct under protanopia,
+        deuteranopia *and* tritanopia do not exist — the field's reference
+        palette does not manage it either (tools/cvd.py measures this).  So
+        rather than pretend, limn adds a second channel when a chart goes
+        past what its theme was validated for: dash patterns on lines, and
+        a note pointing at the forms that scale further.
+        """
+        n = len(series)
+        safe = getattr(theme, "safe_n", len(theme.series))
+        if n <= safe:
+            return
+        patterns = ("7 4", "2 3", "9 3 2 3", "1 3")
+        if self.kind in ("line", "area"):
+            for i, s in enumerate(series[safe:]):
+                if not s.get("dash"):
+                    s["dash"] = patterns[i % len(patterns)]
+            self.notes.append(
+                "%d series is more than the %s palette can keep apart for "
+                "colorblind readers (validated to %d) — the extra series "
+                "are dashed so they stay distinguishable"
+                % (n, theme.name, safe))
+        else:
+            self.notes.append(
+                "%d series is more than the %s palette can keep apart for "
+                "colorblind readers (validated to %d) — consider facet=, "
+                "fewer series, or folding the tail into 'Other'"
+                % (n, theme.name, safe))
+
     def _apply_style(self, series):
         """User overrides: color= (str, list, or {name: hex}), dash=."""
+        names = {s["name"] for s in series}
+        for key in ("color", "dash"):
+            value = self._opts.get(key)
+            wanted = list(value) if isinstance(value, dict) else (
+                [value] if key == "dash" and isinstance(value, str) else
+                (list(value) if key == "dash" and value else []))
+            unknown = [n for n in wanted if n not in names]
+            if unknown:
+                raise IngestError(
+                    "%s= names series %s, which %s not in this chart — "
+                    "available: %s"
+                    % (key, ", ".join(map(repr, unknown)),
+                       "are" if len(unknown) != 1 else "is",
+                       ", ".join(sorted(map(repr, names)))))
         color = self._opts.get("color")
         if isinstance(color, str):
             for s in series:
@@ -259,7 +416,7 @@ class Figure:
             names = set(dash) if not isinstance(dash, str) else {dash}
             for s in series:
                 if s["name"] in names:
-                    s["dash"] = True
+                    s["dash"] = "7 4"
 
     # -- build ----------------------------------------------------------------
 
@@ -280,6 +437,7 @@ class Figure:
         xcol, ycols = self._resolve_xy()
         series = self._series(xcol, ycols, theme)
         self._apply_style(series)
+        self._enforce_secondary_encoding(series, theme)
         series = [s for s in series if any(v is not None for _x, v in s["points"])]
         if not series:
             raise IngestError("nothing to plot — every value is missing")
@@ -322,16 +480,17 @@ class Figure:
                     s["points"] = [(x, v if v is not None and v > 0 else None)
                                    for x, v in s["points"]]
                 values = positive
-            vlo, vhi = self._y_domain(min(values), max(values))
+            vlo, vhi = self._y_domain(min(values), max(values), values)
             sy = Log(vlo, vhi, self._ytarget())
         else:
             include_zero = self.kind == "area"
             pad = 0.05 if self.kind in ("line", "scatter") else 0.0
-            vlo, vhi = self._y_domain(min(values), max(values))
-            if (vlo, vhi) != (min(values), max(values)):
+            vlo, vhi = self._y_domain(min(values), max(values), values)
+            exact = self._ylim_v is not None and "ylo" not in self._force
+            if exact:
                 include_zero, pad = False, 0.0    # an explicit range is law
-            sy = Linear(vlo, vhi, self._ytarget(),
-                        include_zero=include_zero, pad_frac=pad)
+            sy = Linear(vlo, vhi, self._ytarget(), include_zero=include_zero,
+                        pad_frac=pad, exact=exact)
 
         sx = self._x_scale(xcol, series)
         ycol = ycols[0]
@@ -347,10 +506,22 @@ class Figure:
         sort = self._opts.get("sort")
         labels = self._opts.get("labels", False)
 
-        # bars live on a band: categories are the x values, stringified
+        # bars live on a band: categories are the x values, stringified.
+        # Keep the original value beside each label so a numeric category
+        # can still sort as a number rather than as text.
+        original = {}
         for s in series:
-            s["points"] = [(None if x is None else _cat(x), v)
-                           for x, v in s["points"]]
+            points = []
+            for x, v in s["points"]:
+                if x is None:
+                    points.append((None, v))
+                    continue
+                label = _cat(x)
+                original.setdefault(label, x)
+                points.append((label, v))
+            s["points"] = points
+        series[:] = self._aggregate_duplicates(series)
+
         order = self._force.get("xcats")
         if order is None:
             order = []
@@ -359,12 +530,18 @@ class Figure:
                     if c is not None and c not in order:
                         order.append(c)
             if sort in ("y", "-y"):
-                first = dict(series[0]["points"])
-                order.sort(key=lambda c: (first.get(c) is None,
-                                          first.get(c, 0.0)),
+                # Rank on the whole bar, not on whichever series came first:
+                # a stacked chart's order is about its totals.
+                totals = {}
+                for s in series:
+                    for c, v in s["points"]:
+                        if c is not None and v is not None:
+                            totals[c] = totals.get(c, 0.0) + v
+                order.sort(key=lambda c: (c not in totals, totals.get(c, 0.0)),
                            reverse=(sort == "-y"))
-            elif sort == "x":
-                order.sort()
+            elif sort in ("x", "-x"):
+                order.sort(key=lambda c: _sort_key(original.get(c, c)),
+                           reverse=(sort == "-x"))
         band = Band(order)
 
         if stacked and len(series) > 1:
@@ -380,9 +557,26 @@ class Figure:
         else:
             values = [v for s in series for _c, v in s["points"]
                       if v is not None]
-        vlo, vhi = self._y_domain(min(values), max(values))
-        sy = Linear(vlo, vhi, self._ytarget(horizontal),
-                    include_zero=(vlo, vhi) == (min(values), max(values)))
+        missing = [(s["name"], c) for s in series for c, v in s["points"]
+                   if v is None and c is not None]
+        if missing:
+            self.notes.append(
+                "%d bar%s missing (e.g. %s) — no bar is drawn, which looks "
+                "like zero; the value is absent, not zero"
+                % (len(missing), "s are" if len(missing) != 1 else " is",
+                   ", ".join(repr(c) for _n, c in missing[:3])))
+        vlo, vhi = self._y_domain(min(values), max(values), values)
+        exact = self._ylim_v is not None and "ylo" not in self._force
+        if exact and not (vlo <= 0 <= vhi):
+            # Bars encode magnitude by length; cutting the axis above zero
+            # makes 1.6x look like 12x.  limn will draw it, but it says so
+            # and it does not draw a baseline that implies zero.
+            self.notes.append(
+                "ylim(%g, %g) cuts the bar axis above zero — bar *lengths* "
+                "no longer show ratios; consider limn.dot() or a full axis"
+                % (vlo, vhi))
+        sy = Linear(vlo, vhi, self._ytarget(horizontal), exact=exact,
+                    include_zero=not exact)
         ycol = ycols[0]
         spec = dict(sx=band, sy=sy, stacked=stacked, horizontal=horizontal,
                     percent=getattr(ycol, "percent", False),
@@ -390,6 +584,39 @@ class Figure:
                     band_axis="y" if horizontal else "x",
                     bar_labels=labels)
         return spec, series
+
+    def _aggregate_duplicates(self, series):
+        """Tidy data repeats categories; one slot can only show one bar.
+
+        Left alone, the later row's bar is drawn *on top of* the earlier
+        one and the reader sees whichever happened to be taller — a silent
+        lie.  Repeats are combined with *agg* (sum by default) and the
+        decision is reported.
+        """
+        agg = self._opts.get("agg") or "sum"
+        out, folded = [], 0
+        for s in series:
+            groups, order = {}, []
+            for c, v in s["points"]:
+                if c not in groups:
+                    groups[c] = []
+                    order.append(c)
+                groups[c].append(v)
+            if all(len(vs) == 1 for vs in groups.values()):
+                out.append(s)
+                continue
+            points = []
+            for c in order:
+                vals = [v for v in groups[c] if v is not None]
+                folded += len(groups[c]) - 1
+                points.append((c, _combine(vals, agg) if vals else None))
+            out.append(dict(s, points=points))
+        if folded:
+            self.notes.append(
+                "%d repeated categor%s combined by %s — pass agg='mean', "
+                "'max', 'min' or 'count' to change that"
+                % (folded, "ies were" if folded != 1 else "y was", agg))
+        return out
 
     def _prep_hist(self, theme):
         col = None
@@ -421,6 +648,7 @@ class Figure:
         sy = Linear(clo, chi, self._ytarget(), include_zero=True)
         series = [{"name": col.name, "color": theme.series_color(0),
                    "points": []}]
+        self._apply_style(series)
         spec = dict(sx=sx, sy=sy, stacked=False, horizontal=False,
                     percent=col.percent, currency=col.currency,
                     band_axis=None, hist=(edges, counts))
@@ -449,24 +677,42 @@ class Figure:
             raise IngestError("box: every value in %r is missing" % ycol.name)
         stats = [(cat, box_stats(vals)) for cat, vals in groups.items()
                  if vals]
-        band = Band([c for c, _s in stats])
+        forced = self._force.get("xcats")
+        band = Band(forced if forced else [c for c, _s in stats])
         all_vals = [v for vals in groups.values() for v in vals]
-        vlo, vhi = self._y_domain(min(all_vals), max(all_vals))
-        sy = Linear(vlo, vhi, self._ytarget(), pad_frac=0.05)
+        vlo, vhi = self._y_domain(min(all_vals), max(all_vals), all_vals)
+        exact = self._ylim_v is not None and "ylo" not in self._force
+        sy = Linear(vlo, vhi, self._ytarget(),
+                    pad_frac=0.0 if exact else 0.05, exact=exact)
         series = [{"name": ycol.name, "color": theme.series_color(0),
                    "points": []}]
+        self._apply_style(series)
         spec = dict(sx=band, sy=sy, stacked=False, horizontal=False,
                     percent=ycol.percent, currency=ycol.currency,
                     band_axis="x", box=stats)
         return spec, series
 
-    def _y_domain(self, lo, hi):
+    def _y_domain(self, lo, hi, values=()):
         """Data extent, unless the user (or the facet grid) says otherwise."""
         if "ylo" in self._force:
             return self._force["ylo"], self._force["yhi"]
         if self._ylim_v:
+            self._report_clipped(values, self._ylim_v, "ylim")
             return self._ylim_v
         return lo, hi
+
+    def _report_clipped(self, values, limits, which):
+        """A limit that hides data must say so — a clipped bar still looks
+        like a bar, and a reader cannot tell it was cut."""
+        lo, hi = limits
+        outside = [v for v in values if v is not None and not lo <= v <= hi]
+        if outside:
+            self.notes.append(
+                "%s(%g, %g) leaves %d value%s outside the axis (worst %g) — "
+                "%s clipped, not drawn to scale"
+                % (which, lo, hi, len(outside), "s" if len(outside) != 1 else "",
+                   max(outside, key=lambda v: abs(v - (lo + hi) / 2)),
+                   "they are" if len(outside) != 1 else "it is"))
 
     def _x_scale(self, xcol, series):
         if self._opts.get("xlog"):
@@ -490,23 +736,52 @@ class Figure:
         if not xs:
             raise IngestError("nothing to plot on the x axis — "
                               "column %r is all missing" % xcol.name)
+        user = self._xlim_v
         if self._opts.get("xlog"):
-            lo, hi = self._force.get("xlo", min(xs)), self._force.get("xhi", max(xs))
+            lo, hi = self._limit_bounds(user, xs, numeric=True)
             return Log(lo, hi, self._xtarget())
         if xcol.kind == TEMPORAL:
-            lo, hi = self._force.get("xlo", min(xs)), self._force.get("xhi", max(xs))
+            if user and not all(hasattr(v, "year") for v in user):
+                self.notes.append("xlim was given numbers but this x axis is "
+                                  "dates — ignored; pass dates instead")
+                user = None
+            lo, hi = self._limit_bounds(user, xs, numeric=False)
             return Time(lo, hi, self._xtarget())
         if xcol.kind == CATEGORY:
+            if user:
+                self.notes.append("xlim has no meaning on a category axis — "
+                                  "ignored; use sort= or filter the data")
             cats = self._force.get("xcats") \
                 or [x for x in xcol.values if x is not None]
             return Band(cats)
+        if user and any(hasattr(v, "year") for v in user):
+            self.notes.append("xlim was given dates but this x axis is "
+                              "numeric — ignored")
+            user = None
         if "xlo" in self._force:
             return Linear(self._force["xlo"], self._force["xhi"],
                           self._xtarget())
-        if self._xlim_v:
-            return Linear(self._xlim_v[0], self._xlim_v[1], self._xtarget())
+        if user:
+            self._report_clipped(xs, user, "xlim")
+            return Linear(user[0], user[1], self._xtarget(), exact=True)
         pad = 0.02 if self.kind == "scatter" else 0.0
         return Linear(min(xs), max(xs), self._xtarget(), pad_frac=pad)
+
+    def _limit_bounds(self, user, xs, numeric):
+        """User limits win over both the data and the facet-shared domain."""
+        if user:
+            if numeric:
+                self._report_clipped(xs, user, "xlim")
+            else:
+                outside = [v for v in xs if not user[0] <= v <= user[1]]
+                if outside:
+                    self.notes.append("xlim leaves %d point%s outside the "
+                                      "axis — clipped, not drawn"
+                                      % (len(outside),
+                                         "s" if len(outside) != 1 else ""))
+            return user[0], user[1]
+        return (self._force.get("xlo", min(xs)),
+                self._force.get("xhi", max(xs)))
 
     def _ytarget(self, horizontal=False):
         extent = self._w if horizontal else self._h
@@ -547,15 +822,25 @@ class Figure:
         left_w = max([text_width(l, theme.size_axis) for l in left_labels]
                      or [0.0])
         left = left_w + 14
-        if self._ylabel:
-            left = max(left, text_width(self._ylabel, theme.size_axis) -
-                       (0 if left_labels else 0))
+        # Horizontal bars label their tips; negative bars grow leftward, so
+        # their labels need the same reserve on the left the positives get
+        # on the right — otherwise the longest one is sliced by the clip.
+        if spec.get("bar_labels") and spec["horizontal"]:
+            negatives = [v for s in series for _c, v in s["points"]
+                         if v is not None and v < 0]
+            if negatives:
+                left = max(left, left_w + 14 + 8 + max(
+                    text_width(label_fmt(v), theme.size_label)
+                    for v in negatives))
 
         top = 12.0
-        if self._title:
-            top += theme.size_title + 8
-        if self._subtitle:
-            top += theme.size_subtitle + 6
+        title_lines = self._wrap(self._title, theme.size_title, w - 28, True)
+        subtitle_lines = self._wrap(self._subtitle, theme.size_subtitle, w - 28)
+        caption_lines = self._wrap(self._caption, theme.size_caption, w - 28)
+        if title_lines:
+            top += len(title_lines) * (theme.size_title + 3) + 5
+        if subtitle_lines:
+            top += len(subtitle_lines) * (theme.size_subtitle + 2) + 4
         if self._ylabel:
             top += theme.size_axis + 8
 
@@ -568,8 +853,8 @@ class Figure:
         bottom = 8 + theme.size_axis + 10
         if self._xlabel:
             bottom += theme.size_axis + 6
-        if self._caption:
-            bottom += theme.size_caption + 10
+        if caption_lines:
+            bottom += len(caption_lines) * (theme.size_caption + 2) + 8
 
         direct = []
         right = 16.0
@@ -623,10 +908,13 @@ class Figure:
         # generous on the side where bar value labels live; the clip's job
         # is only to stop ylim'd marks from bleeding across the figure
         pad_top = 26 if spec.get("bar_labels") else 6
-        pad_right = 110 if spec.get("bar_labels") and spec["horizontal"] else 1
+        # Bar value labels live just outside the plot rect, and on a
+        # horizontal chart the negative ones hang off the LEFT — so the
+        # allowance has to be symmetric or the longest one loses its digits.
+        pad_side = 110 if spec.get("bar_labels") and spec["horizontal"] else 6
         defs = g.add(El("defs"))
-        defs.add(El("clipPath", [El("rect", x=px0 - 6, y=py0 - pad_top,
-                                    width=px1 - px0 + 6 + pad_right,
+        defs.add(El("clipPath", [El("rect", x=px0 - pad_side, y=py0 - pad_top,
+                                    width=px1 - px0 + 2 * pad_side,
                                     height=py1 - py0 + 2 * pad_top)],
                     id=clip_id))
         marks = g.add(El("g", clip_path="url(#%s)" % clip_id))
@@ -635,7 +923,8 @@ class Figure:
         self._draw_annotations(g, theme, spec, to_x, to_y, to_v,
                                px0, px1, py0, py1)
         self._draw_axes(g, theme, spec, vfmt, px0, px1, py0, py1)
-        y_cursor = self._draw_header(g, theme, legend_rows)
+        y_cursor = self._draw_header(g, theme, legend_rows,
+                                     title_lines, subtitle_lines)
         if self._ylabel:
             g.add(El("text", [self._ylabel], x=px0 - left_w - 0,
                      y=py0 - 10, font_size=theme.size_axis,
@@ -650,8 +939,10 @@ class Figure:
                      text_anchor="middle", font_size=theme.size_axis,
                      fill=theme.muted))
         if self._caption:
-            g.add(El("text", [self._caption], x=14, y=h - 10,
-                     font_size=theme.size_caption, fill=theme.muted))
+            for i, line in enumerate(reversed(caption_lines)):
+                g.add(El("text", [line], x=14,
+                         y=h - 10 - i * (theme.size_caption + 2),
+                         font_size=theme.size_caption, fill=theme.muted))
         return root
 
     # -- pieces --------------------------------------------------------------
@@ -672,9 +963,10 @@ class Figure:
             color = theme.baseline if t == 0 else theme.grid
             g.add(El("line", x1=px0, x2=px1, y1=y, y2=y,
                      stroke=color, stroke_width=1))
-        base_y = crisp(py1)
-        g.add(El("line", x1=px0, x2=px1, y1=base_y, y2=base_y,
-                 stroke=theme.baseline, stroke_width=1))
+        if self.kind != "bar" or sy.lo <= 0 <= sy.hi:
+            base_y = crisp(py1)
+            g.add(El("line", x1=px0, x2=px1, y1=base_y, y2=base_y,
+                     stroke=theme.baseline, stroke_width=1))
 
     def _draw_marks(self, g, theme, spec, series, band, centers, to_v,
                     to_x, to_y, label_fmt, px0, px1, py0, py1):
@@ -694,9 +986,15 @@ class Figure:
                        series[0]["color"])
             return
         if self.kind == "bar":
-            draw_bars(g, series, band, to_v, centers, theme,
-                      spec["stacked"], spec["horizontal"],
-                      spec.get("bar_labels", False), label_fmt, theme.ink2)
+            dropped = draw_bars(g, series, band, to_v, centers, theme,
+                                spec["stacked"], spec["horizontal"],
+                                spec.get("bar_labels", False), label_fmt,
+                                theme.ink2)
+            if dropped:
+                self.notes.append(
+                    "%d value label%s left off — they would have overlapped; "
+                    "try horizontal=True, fewer series, or a bigger figure"
+                    % (dropped, "s were" if dropped != 1 else " was"))
         elif self.kind == "line":
             budget = int((px1 - px0) * 4)
             series = [dict(s, points=decimate(s["points"], to_x, budget))
@@ -757,9 +1055,24 @@ class Figure:
                      **axis_style))
         if isinstance(sx, Band):
             slot = sx.slot(px0, px1)
-            labels = [(sx.center(c, px0, px1),
-                       truncate_to(_cat(c), theme.size_axis, slot * 1.4))
-                      for c in sx.categories]
+            full = [(sx.center(c, px0, px1), _cat(c)) for c in sx.categories]
+            kept = _thin_labels(full, theme.size_axis)
+            # Truncate only after thinning: doing it the other way round
+            # clipped every label to an empty string on a crowded axis, and
+            # the collision check then "passed" over nothing at all.
+            stride_room = slot * max(1, len(full) // max(len(kept), 1)) * 1.2
+            # A centred label also may not run off the canvas, so the
+            # outermost ones get whatever the edge leaves them.
+            labels = [(x, truncate_to(t, theme.size_axis,
+                                      min(stride_room,
+                                          2 * max(x - 3, 8),
+                                          2 * max(self._w - x - 3, 8))))
+                      for x, t in kept]
+            if len(kept) < len(full):
+                self.notes.append(
+                    "x axis: only %d of %d category labels fit — the rest "
+                    "are in the data, not on the chart (a horizontal bar "
+                    "chart fits them all)" % (len(kept), len(full)))
         elif isinstance(sx, Time):
             labels = list(zip((sx.to_px(t, px0, px1)
                                for t in sx.tick_values()), sx.tick_labels()))
@@ -768,7 +1081,8 @@ class Figure:
                 else axis_formatter(sx.tick_values())
             labels = [(sx.to_px(t, px0, px1), xfmt(t))
                       for t in sx.tick_values()]
-        labels = _thin_labels(labels, theme.size_axis)
+        if not isinstance(sx, Band):
+            labels = _thin_labels(labels, theme.size_axis)
         for x, label in labels:
             g.add(El("text", [label], x=x, y=py1 + theme.size_axis + 6,
                      text_anchor="middle", **axis_style))
@@ -794,6 +1108,10 @@ class Figure:
                                    py0, py1)
             else:
                 y = to_y(v)
+                if y is None:
+                    self.notes.append("hline at %s has no position on a log "
+                                      "axis — skipped" % value)
+                    continue
                 if not py0 <= y <= py1:
                     self.notes.append("hline at %s is outside the value "
                                       "range — skipped" % value)
@@ -857,19 +1175,60 @@ class Figure:
             return parse_temporal(value)
         return _as_number(value)
 
-    def _draw_header(self, g, theme, legend_rows):
+    def _wrap(self, text, size, max_width, bold=False):
+        """Break a headline into measured lines that fit the figure.
+
+        The library's whole promise is that nothing clips; the title was
+        the one string exempt from it.  Words longer than the line get
+        truncated with an ellipsis rather than bleeding off the canvas.
+        """
+        if not text:
+            return []
+        lines, current = [], ""
+        for word in str(text).split():
+            trial = (current + " " + word).strip()
+            if current and text_width(trial, size, bold) > max_width:
+                lines.append(current)
+                current = word
+            else:
+                current = trial
+            if text_width(current, size, bold) > max_width:
+                lines.append(truncate_to(current, size, max_width, bold))
+                current = ""
+        if current:
+            lines.append(current)
+        if len(lines) > 3:                      # a headline, not an essay
+            kept = lines[:3]
+            kept[2] = truncate_to(" ".join(lines[2:]), size, max_width, bold)
+            self.notes.append("text trimmed to three lines: %r"
+                              % (str(text)[:48] + "…"))
+            lines = kept
+        return lines
+
+    def _draw_header(self, g, theme, legend_rows, title_lines=None,
+                     subtitle_lines=None):
+        w = self._w
         y = 12.0
-        if self._title:
-            size = 12.5 if self._panel else theme.size_title
+        size = 12.5 if self._panel else theme.size_title
+        if title_lines is None:
+            title_lines = self._wrap(self._title, size, w - 28, True)
+        if subtitle_lines is None:
+            subtitle_lines = self._wrap(self._subtitle, theme.size_subtitle,
+                                        w - 28)
+        for line in title_lines:
             y += size
-            g.add(El("text", [self._title], x=14, y=y, fill=theme.ink,
+            g.add(El("text", [line], x=14, y=y, fill=theme.ink,
                      font_size=size, font_weight="600"))
-            y += 8
-        if self._subtitle:
-            y += theme.size_subtitle - 2
-            g.add(El("text", [self._subtitle], x=14, y=y, fill=theme.ink2,
+            y += 3
+        if title_lines:
+            y += 2
+        for line in subtitle_lines:
+            y += theme.size_subtitle
+            g.add(El("text", [line], x=14, y=y, fill=theme.ink2,
                      font_size=theme.size_subtitle))
-            y += 6
+            y += 2
+        if subtitle_lines:
+            y += 2
         for row in legend_rows:
             y += 14
             x = 14.0
@@ -923,6 +1282,17 @@ class Figure:
     # -- heatmap (its own layout: two band axes + a ramp legend) --------------
 
     def _build_heatmap(self, theme):
+        ignored = [name for name, used in (
+            ("xlabel", self._xlabel), ("ylabel", self._ylabel),
+            ("hline", self._hlines), ("vline", self._vlines),
+            ("flag", self._flags), ("xlim", self._xlim_v),
+            ("ylim", self._ylim_v),
+            ("legend", self._legend != "auto")) if used]
+        if ignored:
+            self.notes.append(
+                "heatmap has no value axis to hang %s on — %s ignored"
+                % (", ".join("%s()" % n for n in ignored),
+                   "they were" if len(ignored) != 1 else "it was"))
         matrix, row_labels, col_labels = _matrix_from(self._raw, self)
         w, h = self._w, self._h
         fmt = lambda v: fmt_value(v)
@@ -967,8 +1337,11 @@ class Figure:
         self._draw_header(root, theme, [])
         self._draw_ramp_legend(root, theme, lo, hi, fmt, w, top)
         if self._caption:
-            root.add(El("text", [self._caption], x=14, y=h - 10,
-                        font_size=theme.size_caption, fill=theme.muted))
+            for i, line in enumerate(reversed(
+                    self._wrap(self._caption, theme.size_caption, w - 28))):
+                root.add(El("text", [line], x=14,
+                            y=h - 10 - i * (theme.size_caption + 2),
+                            font_size=theme.size_caption, fill=theme.muted))
         return root
 
     def _draw_ramp_legend(self, root, theme, lo, hi, fmt, w, top):
@@ -1003,9 +1376,11 @@ class Figure:
         colors, and histogram bin edges are computed once, from all the
         data, and imposed on every panel.
         """
-        if self.kind in ("heatmap", "box"):
-            raise IngestError("facet isn't supported for %s charts"
-                              % self.kind)
+        if self.kind == "heatmap":
+            raise IngestError(
+                "facet isn't supported for heatmaps — a heatmap is already "
+                "a two-dimensional grid; give it the extra dimension as "
+                "rows or columns instead")
         fcol = self._col(self._facet)
         panels, row_index = [], {}
         for i, v in enumerate(fcol.values):
@@ -1052,7 +1427,11 @@ class Figure:
             child._theme = self._theme
             child._legend = "none"
             child._panel = True
-            child._opts["markers"] = False   # beads read as dashes at panel size
+            if self.kind == "line" and self._opts.get("markers", True):
+                child._opts["markers"] = False   # beads blur at panel size
+                if len(children) == 0:
+                    self.notes.append("point markers are off inside facet "
+                                      "panels — they blur at panel size")
             child._title = key
             child._hlines = self._hlines
             child._vlines = self._vlines
@@ -1102,6 +1481,10 @@ class Figure:
         legend_rows = _wrap_legend(items, theme, w - 28) if items else []
         top += len(legend_rows) * 19 + (4 if legend_rows else 2)
         bottom = (theme.size_caption + 14) if self._caption else 8
+        if self._xlabel:
+            bottom += theme.size_axis + 8
+        if self._ylabel:
+            top += theme.size_axis + 6
         gap = 12.0
         pw = (w - 20 - (cols - 1) * gap) / cols
         ph = (h - top - bottom - (rows - 1) * gap) / rows
@@ -1125,13 +1508,77 @@ class Figure:
             for note in child.notes:
                 if note not in self.notes:
                     self.notes.append(note)
+        if self._ylabel:
+            root.add(El("text", [truncate_to(self._ylabel, theme.size_axis,
+                                             w - 28)],
+                        x=14, y=top - 5, font_size=theme.size_axis,
+                        fill=theme.muted))
+        if self._xlabel:
+            root.add(El("text", [truncate_to(self._xlabel, theme.size_axis,
+                                             w - 28)],
+                        x=w / 2,
+                        y=h - (10 if not self._caption
+                               else 12 + theme.size_caption),
+                        text_anchor="middle", font_size=theme.size_axis,
+                        fill=theme.muted))
         if self._caption:
-            root.add(El("text", [self._caption], x=14, y=h - 10,
-                        font_size=theme.size_caption, fill=theme.muted))
+            for i, line in enumerate(reversed(
+                    self._wrap(self._caption, theme.size_caption, w - 28))):
+                root.add(El("text", [line], x=14,
+                            y=h - 10 - i * (theme.size_caption + 2),
+                            font_size=theme.size_caption, fill=theme.muted))
         return root
 
 
 # -- helpers ---------------------------------------------------------------------
+
+
+_CSS_COLORS = frozenset("""
+black silver gray grey white maroon red purple fuchsia magenta green lime
+olive yellow navy blue teal aqua cyan orange pink brown gold beige ivory
+khaki lavender salmon coral crimson indigo violet turquoise tan plum orchid
+tomato steelblue skyblue seagreen slategray slategrey midnightblue
+darkblue darkgreen darkred darkgray darkgrey darkorange darkviolet
+lightblue lightgreen lightgray lightgrey lightyellow transparent none
+""".split())
+
+_HEX = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}"
+                  r"|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$")
+
+
+def _is_color(value):
+    """Would a browser understand this? — better asked here than discovered
+    as a black mark in the rendered chart."""
+    if not isinstance(value, str):
+        return False
+    v = value.strip()
+    if _HEX.match(v) or v.lower() in _CSS_COLORS:
+        return True
+    return bool(re.match(r"^(rgb|rgba|hsl|hsla)\(", v.lower()))
+
+
+def _combine(values, agg):
+    if agg == "mean":
+        return sum(values) / len(values)
+    if agg == "max":
+        return max(values)
+    if agg == "min":
+        return min(values)
+    if agg == "count":
+        return float(len(values))
+    if agg == "first":
+        return values[0]
+    if agg == "last":
+        return values[-1]
+    return sum(values)
+
+
+def _sort_key(value):
+    """Sort numbers as numbers and text as text — 2 before 10, not after."""
+    num = _as_number(value)
+    if num is not None:
+        return (0, num, "")
+    return (1, 0.0, str(value))
 
 
 def _as_number(value):

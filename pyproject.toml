@@ -4,22 +4,35 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "limn-charts"
-version = "1.1.0"
+version = "1.2.0"
 description = "Charts for people who have real data, not clean data — zero-dependency SVG plotting with smart ingestion."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
-authors = [{ name = "Alberto Barnabo" }]
+authors = [{ name = "Alberto Barnabo", email = "alberto.barnabo@gmail.com" }]
 keywords = ["charts", "plotting", "svg", "visualization", "csv",
             "data-cleaning", "zero-dependency"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
+    "Intended Audience :: Financial and Insurance Industry",
     "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3 :: Only",
     "Topic :: Scientific/Engineering :: Visualization",
+    "Topic :: Multimedia :: Graphics :: Presentation",
+    "Typing :: Typed",
 ]
+
+[project.scripts]
+limn = "limn.__main__:main"
 
 [project.optional-dependencies]
 png = ["cairosvg>=2.5"]
@@ -33,3 +46,6 @@ Issues = "https://github.com/albertobarnabo/limn/issues"
 
 [tool.setuptools]
 packages = ["limn"]
+
+[tool.setuptools.package-data]
+limn = ["py.typed"]

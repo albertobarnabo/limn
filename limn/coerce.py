@@ -32,11 +32,11 @@ _SUFFIX_MULT = {"k": 1e3, "m": 1e6, "mm": 1e6, "mn": 1e6, "b": 1e9,
 
 
 def is_missing(value):
-    """The many spellings of nothing."""
+    """The many spellings of nothing — including the un-plottable floats."""
     if value is None:
         return True
-    if isinstance(value, float) and value != value:  # NaN
-        return True
+    if isinstance(value, float) and (value != value or value in (INF, -INF)):
+        return True   # NaN and ±inf have no position on any axis
     if isinstance(value, str):
         return value.strip().casefold() in MISSING_TOKENS
     return False
@@ -56,9 +56,16 @@ class NumberHint:
 
 
 _GROUPED_COMMA = re.compile(r"^\d{1,3}(,\d{3})+(\.\d+)?$")
+# Two or more dot groups can only be thousands (1.234.567); ONE dot group is
+# genuinely ambiguous — "1.085" is an FX rate far more often than it is a
+# German thousand — so it needs column-level evidence.  See _parse_bare_number.
+_GROUPED_DOT_MULTI = re.compile(r"^\d{1,3}(\.\d{3}){2,}(,\d+)?$")
+_GROUPED_DOT_ONE = re.compile(r"^\d{1,3}\.\d{3}(,\d+)?$")
 _GROUPED_DOT = re.compile(r"^\d{1,3}(\.\d{3})+(,\d+)?$")
 _GROUPED_SPACE = re.compile(r"^\d{1,3}( \d{3})+([.,]\d+)?$")
+_GROUPED_APOSTROPHE = re.compile(r"^\d{1,3}('\d{3})+([.,]\d+)?$")   # Swiss
 _PLAIN = re.compile(r"^\d+$")
+INF = float("inf")
 
 
 def parse_number(value, decimal_comma=None):
@@ -83,12 +90,16 @@ def parse_number(value, decimal_comma=None):
     if not isinstance(value, str):
         return None
 
-    s = value.strip().replace("−", "-").replace(" ", " ")
+    # U+00A0 no-break, U+202F narrow no-break, U+2009 thin — all group digits
+    s = (value.strip().replace("−", "-")
+         .replace(" ", " ").replace(" ", " ").replace(" ", " "))
     if s.casefold() in MISSING_TOKENS:
         return None
     hint = NumberHint()
 
     negative = False
+    # Excel's accounting export puts the symbol outside the parens: $(2,400)
+    s, hint.currency = _strip_currency(s, hint.currency)
     if s.startswith("(") and s.endswith(")"):
         s, negative = s[1:-1].strip(), True
     if s.startswith("-"):
@@ -100,19 +111,7 @@ def parse_number(value, decimal_comma=None):
         hint.percent = True
         s = s[:-1].strip()
 
-    for sym in _CURRENCY_SYMBOLS:
-        if s.startswith(sym) or s.endswith(sym):
-            hint.currency = sym
-            s = s.strip(sym).strip()
-            break
-    else:
-        head = s[:3].casefold()
-        if head in _CURRENCY_CODES and (len(s) == 3 or s[3] in " 0123456789"):
-            hint.currency = _CURRENCY_CODES[head]
-            s = s[3:].strip()
-        elif s[-3:].casefold() in _CURRENCY_CODES and len(s) > 3:
-            hint.currency = _CURRENCY_CODES[s[-3:].casefold()]
-            s = s[:-3].strip()
+    s, hint.currency = _strip_currency(s, hint.currency)
 
     if s.endswith("%"):  # a percent that was hiding behind a currency code
         hint.percent = True
@@ -122,7 +121,11 @@ def parse_number(value, decimal_comma=None):
     low = s.casefold()
     for suf in ("bn", "tn", "mm", "mn", "k", "m", "b", "t"):
         if low.endswith(suf) and len(s) > len(suf):
-            body = s[: -len(suf)].strip()
+            body = s[: -len(suf)]
+            # "3.2M" is a magnitude; "5 m" is five metres — a real suffix is
+            # written flush against its number, a unit is spaced off it.
+            if body[-1:].isspace():
+                break
             if body and (body[-1].isdigit() or body[-1] in ".,"):
                 mult = _SUFFIX_MULT[suf]
                 s = body
@@ -132,11 +135,33 @@ def parse_number(value, decimal_comma=None):
     if parsed is None:
         return None
     result = parsed * mult
+    if result in (INF, -INF) or result != result:
+        return None     # 1e400 and friends have no place on an axis
     return (-result if negative else result), hint
 
 
+def _strip_currency(s, found):
+    """Peel one currency symbol or ISO code off either end of *s*."""
+    for sym in _CURRENCY_SYMBOLS:
+        if s.startswith(sym) or s.endswith(sym):
+            return s.strip(sym).strip(), (found or sym)
+    head = s[:3].casefold()
+    if head in _CURRENCY_CODES and (len(s) == 3 or s[3] in " 0123456789(-+"):
+        return s[3:].strip(), (found or _CURRENCY_CODES[head])
+    if len(s) > 3 and s[-3:].casefold() in _CURRENCY_CODES:
+        return s[:-3].strip(), (found or _CURRENCY_CODES[s[-3:].casefold()])
+    return s, found
+
+
 def _parse_bare_number(s, decimal_comma):
-    """Digits and separators only; separator style is validated, not guessed."""
+    """Digits and separators only; separator style is validated, not guessed.
+
+    The one dangerous ambiguity is a *single* dot group: ``1.085`` is an FX
+    rate, a latency, or a batting average far more often than it is a German
+    thousand.  It is only read as thousands when the column proved European
+    style (*decimal_comma*) — otherwise a plain float, so ``0.125`` stays
+    an eighth instead of becoming a hundred and twenty-five.
+    """
     if not s:
         return None
     if decimal_comma and s.count(",") == 1 and "." not in s:
@@ -145,8 +170,14 @@ def _parse_bare_number(s, decimal_comma):
             return float(head + "." + tail)
     if _GROUPED_COMMA.match(s):            # 1,234,567.89
         return float(s.replace(",", ""))
-    if _GROUPED_DOT.match(s):              # 1.234.567,89
+    if _GROUPED_APOSTROPHE.match(s):       # 1'234'567.89 (Swiss)
+        return float(s.replace("'", "").replace(",", "."))
+    if _GROUPED_DOT_MULTI.match(s):        # 1.234.567,89 — unambiguous
         return float(s.replace(".", "").replace(",", "."))
+    if _GROUPED_DOT_ONE.match(s):          # 1.085 — ambiguous, needs evidence
+        if decimal_comma or "," in s:
+            return float(s.replace(".", "").replace(",", "."))
+        return float(s)                    # a plain decimal, left alone
     if _GROUPED_SPACE.match(s):            # 1 234 567,89
         return float(s.replace(" ", "").replace(",", "."))
     if "," in s and "." not in s:
@@ -156,10 +187,26 @@ def _parse_bare_number(s, decimal_comma):
                 return float(head + tail)   # 1,234 -> thousands by default
             return float(head + "." + tail)  # 3,14 -> decimal comma
         return None
+    if s.strip().casefold().lstrip("+-") in ("inf", "infinity"):
+        return None                        # not a plottable position
     try:
         return float(s)
     except ValueError:
         return None
+
+
+def proves_dot_thousands(value):
+    """True when a string can only be read dot-as-thousands (``1.234.567``).
+
+    The mirror of :func:`proves_decimal_comma`: it lets a column that
+    contains one unambiguous German number reinterpret its ambiguous
+    ``1.085`` siblings as thousands.
+    """
+    if not isinstance(value, str):
+        return False
+    s, _cur = _strip_currency(value.strip().strip("()+-%").strip(), None)
+    return bool(_GROUPED_DOT_MULTI.match(s)
+                or (_GROUPED_DOT_ONE.match(s) and "," in s))
 
 
 def proves_decimal_comma(value):
@@ -175,6 +222,19 @@ def proves_decimal_comma(value):
     return bool(comma) and "," not in tail and "." not in s \
         and _PLAIN.match(head or "0") is not None \
         and _PLAIN.match(tail) is not None and len(tail) != 3
+
+
+def _naive(dt):
+    """Every datetime limn stores is naive UTC.
+
+    Mixing aware and naive datetimes in one column makes them mutually
+    incomparable, and the tick machinery does arithmetic on them — so an
+    offset is applied and dropped here, at the door, rather than crashing
+    three layers down.
+    """
+    if dt.tzinfo is None:
+        return dt
+    return (dt - dt.utcoffset()).replace(tzinfo=None)
 
 
 _ISO_TZ = re.compile(r"[zZ]$")
@@ -197,7 +257,7 @@ def parse_temporal(value, dayfirst=False):
     honestly as numbers than as guessed timestamps.
     """
     if isinstance(value, datetime):
-        return value
+        return _naive(value)
     if isinstance(value, date):
         return datetime(value.year, value.month, value.day)
     if not isinstance(value, str):
@@ -208,7 +268,7 @@ def parse_temporal(value, dayfirst=False):
 
     iso = _ISO_TZ.sub("+00:00", s)
     try:
-        return datetime.fromisoformat(iso)
+        return _naive(datetime.fromisoformat(iso))
     except ValueError:
         pass
 

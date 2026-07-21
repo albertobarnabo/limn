@@ -1,6 +1,12 @@
 """v1.1 features: annotations, log-x, limits, facets, boxes, styling,
 decimation, and the PNG escape hatch."""
 
+import builtins
+import contextlib
+import gzip
+import io
+import os
+import tempfile
 import unittest
 import xml.etree.ElementTree as ET
 
@@ -82,7 +88,8 @@ class TestLimitsAndLog(unittest.TestCase):
     def test_xlog_drops_nonpositive_with_note(self):
         fig = limn.scatter({"a": [0, 1, 10], "b": [1, 2, 3]},
                            x="a", y="b", xlog=True)
-        parse(fig)
+        with contextlib.redirect_stderr(io.StringIO()):
+            parse(fig)
         self.assertTrue(any("log x" in n for n in fig.notes))
 
     def test_xlog_needs_numbers(self):
@@ -211,16 +218,65 @@ class TestDecimation(unittest.TestCase):
 
 
 class TestPng(unittest.TestCase):
-    def test_png_without_cairosvg_explains_itself(self):
-        try:
-            import cairosvg  # noqa: F401
-            self.skipTest("cairosvg installed; error path not reachable")
-        except ImportError:
-            pass
+    """PNG has two failure modes, and they need different cures: cairosvg
+    absent (pip install) versus cairosvg present but libcairo unloadable
+    (a system package).  Both must be caught — `import cairosvg` raises
+    OSError in the second case, not ImportError."""
+
+    def _png_error(self, exc):
         fig = limn.hist([1, 2, 3])
-        with self.assertRaises(RuntimeError) as ctx:
-            fig.save("/tmp/limn-test.png")
-        self.assertIn("cairosvg", str(ctx.exception))
+        real_import = builtins.__import__
+
+        def fake(name, *a, **kw):
+            if name == "cairosvg":
+                raise exc
+            return real_import(name, *a, **kw)
+
+        builtins.__import__ = fake
+        try:
+            with self.assertRaises(RuntimeError) as ctx:
+                fig.save(os.path.join(tempfile.gettempdir(), "limn-t.png"))
+        finally:
+            builtins.__import__ = real_import
+        return str(ctx.exception)
+
+    def test_missing_package_says_pip(self):
+        msg = self._png_error(ImportError("no module named cairosvg"))
+        self.assertIn("pip install", msg)
+        self.assertIn(".svg", msg)
+
+    def test_missing_system_library_says_brew_not_pip(self):
+        msg = self._png_error(OSError("no library called 'cairo-2' was found"))
+        self.assertIn("cairo", msg)
+        self.assertNotIn("pip install", msg)
+
+
+class TestSaveTargets(unittest.TestCase):
+    def test_unknown_extension_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError) as ctx:
+                limn.hist([1, 2, 3]).save(os.path.join(tmp, "chart.pdf"))
+            self.assertIn(".pdf", str(ctx.exception))
+            self.assertFalse(os.listdir(tmp), "refused save left a file")
+
+    def test_svgz_is_gzipped_svg(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "chart.svgz")
+            limn.hist([1, 2, 3]).save(path)
+            with gzip.open(path, "rt", encoding="utf-8") as f:
+                self.assertTrue(f.read().startswith("<?xml"))
+
+    def test_failed_render_does_not_truncate_the_old_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "chart.svg")
+            limn.hist([1, 2, 3]).save(path)
+            with open(path) as f:
+                before = f.read()
+            doomed = limn.line({"x": [1, 2], "y": [3, 4]}, x="x").size(70, 60)
+            with self.assertRaises(ValueError):
+                doomed.save(path)
+            with open(path) as f:
+                self.assertEqual(f.read(), before)
 
 
 if __name__ == "__main__":

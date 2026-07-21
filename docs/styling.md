@@ -69,8 +69,9 @@ drawn into the void.
 ## Axis control
 
 ```python
-fig.ylim(0, 100)          # fix the value axis; marks beyond it clip
-fig.xlim(0, 50)           # fix a numeric x axis
+fig.ylim(0, 100)          # exact; marks beyond it clip AND limn says so
+fig.xlim(0, 50)           # numeric x axis
+fig.xlim("2026-01-01", "2026-03-31")     # or dates, on a time axis
 limn.line(data, ylog=True)            # log value axis
 limn.scatter(data, xlog=True)         # log x axis
 ```
@@ -78,7 +79,17 @@ limn.scatter(data, xlog=True)         # log x axis
 Log axes label decades compactly (`1 · 10 · 100 · 1k · 10k`); zero and
 negative values can't live on one, so they're dropped with a note.
 
+Limits are promises, not hints: the axis is exactly the range you gave,
+not widened outward to round numbers. Anything outside it is clipped and
+counted in `fig.notes`. On a bar chart, a range that excludes zero also
+removes the baseline — a bar whose length no longer encodes its value
+must not *look* like one that does.
+
 ## Legends and direct labels
+
+Past a theme's measured safe series count (`theme.safe_n` — 8 for both
+shipped themes), color alone stops being reliable for colorblind readers,
+so limn dashes the extra line series automatically and notes it.
 
 With two or more series a legend always appears (identity is never
 color-alone); line and area charts with ≤ 4 series *additionally* get

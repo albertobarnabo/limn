@@ -18,8 +18,12 @@ class Theme:
         self.__dict__.update(tokens)
 
     def series_color(self, i):
-        """Fixed-order assignment; past 8 series the palette repeats and a
-        legend becomes mandatory (limn already always draws one there)."""
+        """Fixed-order assignment.
+
+        Past the palette's length the hues repeat, which is why figure.py
+        refuses to rely on color alone that far out — see ``safe_n`` and
+        the secondary-encoding rule it triggers.
+        """
         return self.series[i % len(self.series)]
 
 
@@ -43,11 +47,17 @@ PAPER = Theme(
     surface="#fcfcfb",
     ink="#0b0b0b",
     ink2="#52514e",
-    muted="#898781",
+    muted="#75736d",          # 4.62:1 on the surface — WCAG AA for body text
     grid="#e1e0d9",
     baseline="#c3c2b7",
-    series=["#2a78d6", "#1baf7a", "#eda100", "#008300",
-            "#4a3aa7", "#e34948", "#e87ba4", "#eb6834"],
+    # Measured, not asserted — tools/cvd.py computes it, tests/test_palette.py
+    # asserts it.  All-PAIRS minimum ΔE (every pair, not just neighbours) is
+    # 8.8 across normal, protanopia and deuteranopia; every slot clears 3:1
+    # against the surface.  Tritanopia (~0.01% of people) reaches 2.7 — no
+    # eight-colour palette solves it, the reference Okabe-Ito set included.
+    series=["#2a78d6", "#854d0e", "#009e73", "#075985",
+            "#d55e00", "#0f766e", "#5b21b6", "#0891b2"],
+    safe_n=8,
     ramp=["#cde2fb", "#b7d3f6", "#9ec5f4", "#86b6ef", "#6da7ec", "#5598e7",
           "#3987e5", "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#104281",
           "#0d366b"],
@@ -59,11 +69,14 @@ DUSK = Theme(
     surface="#1a1a19",
     ink="#ffffff",
     ink2="#c3c2b7",
-    muted="#898781",
+    muted="#9c9a93",          # 6.18:1 on the dark surface
     grid="#2c2c2a",
     baseline="#383835",
-    series=["#3987e5", "#199e70", "#c98500", "#008300",
-            "#9085e9", "#e66767", "#d55181", "#d95926"],
+    # Same measurement against the dark surface: 9.4 all-pairs across
+    # normal/protanopia/deuteranopia, 4.9 under tritanopia, all slots >= 3:1.
+    series=["#3987e5", "#eda100", "#a16207", "#d8b4fe",
+            "#0d7c8a", "#1baf7a", "#7c3aed", "#c98500"],
+    safe_n=8,
     ramp=["#0d366b", "#104281", "#184f95", "#1c5cab", "#256abf", "#2a78d6",
           "#3987e5", "#5598e7", "#6da7ec", "#86b6ef", "#9ec5f4", "#b7d3f6",
           "#cde2fb"],

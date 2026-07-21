@@ -16,6 +16,10 @@ Seven forms: line, area, bar, scatter, hist, box, heatmap — plus
 plot(), which looks at the data and picks one.  Annotations, small
 multiples, and log axes are one call each.  Figures render inline in
 notebooks.
+
+Whatever limn has to decide about your data — an ambiguous date, a
+clipped value, a label that would not fit — it says so once on stderr,
+and leaves it on ``fig.notes``.  It never decides quietly.
 """
 
 from .api import line, area, bar, scatter, hist, box, heatmap, plot
@@ -23,7 +27,7 @@ from .figure import Figure
 from .ingest import ingest, IngestError
 from .theme import THEMES, Theme
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 __all__ = ["line", "area", "bar", "scatter", "hist", "box", "heatmap",
            "plot", "Figure", "ingest", "IngestError", "THEMES", "Theme",

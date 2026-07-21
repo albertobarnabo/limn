@@ -22,7 +22,18 @@ class Linear:
     kind = "linear"
 
     def __init__(self, dmin, dmax, target=5, include_zero=False,
-                 pad_frac=0.0):
+                 pad_frac=0.0, exact=False):
+        if exact:
+            # A range the user asked for is a promise, not a hint: keep the
+            # domain exactly as given and put ticks *inside* it, instead of
+            # widening outward to the nearest round numbers.
+            self.lo, self.hi = float(dmin), float(dmax)
+            if self.hi <= self.lo:
+                self.hi = self.lo + 1.0
+            inner = [t for t in linear_ticks(self.lo, self.hi, target)
+                     if self.lo - 1e-9 <= t <= self.hi + 1e-9]
+            self.ticks = inner if len(inner) >= 2 else [self.lo, self.hi]
+            return
         if include_zero:
             dmin, dmax = min(dmin, 0.0), max(dmax, 0.0)
         if pad_frac and dmax > dmin:

@@ -18,13 +18,23 @@ Shared optional parameters:
   ``{series_name: hex}`` dict.
 """
 
+from typing import Any, Dict, List, Optional, Sequence, Union
+
 from .figure import Figure
 from .ingest import ingest, NUMBER, TEMPORAL, CATEGORY
 
+Data = Any                                   # any ingestible shape
+Col = Optional[Union[str, int]]
+Cols = Optional[Union[str, int, Sequence[Union[str, int]]]]
+Color = Optional[Union[str, Sequence[str], Dict[str, str]]]
+Names = Optional[Union[str, Sequence[str]]]
 
-def line(data, x=None, y=None, by=None, title=None, markers=True,
-         ylog=False, xlog=False, color=None, dash=None, facet=None,
-         cols=None):
+
+def line(data: Data, x: Col = None, y: Cols = None, by: Col = None,
+         title: Optional[str] = None, markers: bool = True,
+         ylog: bool = False, xlog: bool = False, color: Color = None,
+         dash: Names = None, facet: Col = None,
+         cols: Optional[int] = None) -> Figure:
     """A line chart.  Missing values become visible gaps, never lies.
 
     *dash* names series to draw dashed (a list of names, or one name) —
@@ -36,54 +46,66 @@ def line(data, x=None, y=None, by=None, title=None, markers=True,
                   dash=dash, facet=facet, cols=cols)
 
 
-def area(data, x=None, y=None, by=None, title=None, stack=True,
-         color=None, facet=None, cols=None):
+def area(data: Data, x: Col = None, y: Cols = None, by: Col = None,
+         title: Optional[str] = None, stack: bool = True, color: Color = None,
+         facet: Col = None, cols: Optional[int] = None,
+         ylog: bool = False) -> Figure:
     """An area chart; multiple series stack by default (set stack=False
     for overlapping washes)."""
     return Figure("area", data, x=x, y=y, by=by, title=title, stack=stack,
-                  color=color, facet=facet, cols=cols)
+                  color=color, facet=facet, cols=cols, ylog=ylog)
 
 
-def bar(data, x=None, y=None, by=None, title=None, stack=False,
-        horizontal=False, sort=None, labels=False, color=None, facet=None,
-        cols=None):
+def bar(data: Data, x: Col = None, y: Cols = None, by: Col = None,
+        title: Optional[str] = None, stack: bool = False,
+        horizontal: bool = False, sort: Optional[str] = None,
+        labels: bool = False, color: Color = None, facet: Col = None,
+        cols: Optional[int] = None, agg: str = "sum",
+        ylog: bool = False) -> Figure:
     """A bar chart.  *by* (or several y columns) groups — or stacks, with
     stack=True; *sort* is None (data order), 'x', 'y', or '-y'; *labels*
     puts values at the bar ends."""
     return Figure("bar", data, x=x, y=y, by=by, title=title, stack=stack,
                   horizontal=horizontal, sort=sort, labels=labels,
-                  color=color, facet=facet, cols=cols)
+                  color=color, facet=facet, cols=cols, agg=agg, ylog=ylog)
 
 
-def scatter(data, x=None, y=None, by=None, size=None, title=None,
-            ylog=False, xlog=False, color=None, facet=None, cols=None):
+def scatter(data: Data, x: Col = None, y: Col = None, by: Col = None,
+            size: Col = None, title: Optional[str] = None, ylog: bool = False,
+            xlog: bool = False, color: Color = None, facet: Col = None,
+            cols: Optional[int] = None) -> Figure:
     """A scatter plot; *by* colors by category, *size* scales dot area
     by a numeric column, *xlog*/*ylog* switch to log axes."""
     return Figure("scatter", data, x=x, y=y, by=by, size=size, title=title,
                   ylog=ylog, xlog=xlog, color=color, facet=facet, cols=cols)
 
 
-def hist(data, x=None, bins="auto", title=None, color=None, facet=None,
-         cols=None):
+def hist(data: Data, x: Col = None, bins: Union[str, int] = "auto",
+         title: Optional[str] = None, color: Color = None, facet: Col = None,
+         cols: Optional[int] = None) -> Figure:
     """A histogram with Freedman–Diaconis binning (or give *bins* an int).
     Faceted histograms share their bin edges, so panels are comparable."""
     return Figure("hist", data, x=x, title=title, bins=bins, color=color,
                   facet=facet, cols=cols)
 
 
-def box(data, x=None, y=None, title=None, color=None):
+def box(data: Data, x: Col = None, y: Col = None,
+        title: Optional[str] = None, color: Color = None, facet: Col = None,
+        cols: Optional[int] = None) -> Figure:
     """Box plots: quartile boxes, median, Tukey whiskers (1.5·IQR), and
     outlier dots — one box per category in *x* (or one overall)."""
-    return Figure("box", data, x=x, y=y, title=title, color=color)
+    return Figure("box", data, x=x, y=y, title=title, color=color,
+                  facet=facet, cols=cols)
 
 
-def heatmap(data, title=None):
+def heatmap(data: Data, title: Optional[str] = None) -> Figure:
     """A heatmap from a numeric matrix, or a table whose category column
     labels the rows."""
     return Figure("heatmap", data, title=title)
 
 
-def plot(data, x=None, y=None, by=None, title=None):
+def plot(data: Data, x: Col = None, y: Cols = None, by: Col = None,
+         title: Optional[str] = None) -> Figure:
     """Look at the data, pick the form.
 
     time on x -> line · two numerics -> scatter · category + numeric ->

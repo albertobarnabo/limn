@@ -24,22 +24,35 @@ you would have done by hand — and tells you what it did.
 |---|---|
 | `1234`, `-3.5`, `1e3`, `+7` | plain numbers |
 | `1,234,567.89` | US grouping |
-| `1.234.567,89` | European grouping |
+| `1.234.567,89` | European grouping (two or more dot groups: unambiguous) |
+| `1.085` | **a plain decimal** — a single dot group is only read as thousands when another value in the column proves European style |
+| `1'234'567` | Swiss grouping |
 | `1 234 567,89` | SI/French grouping |
 | `3,14` | decimal comma — *when the column proves it* |
 | `$1,204` · `€99` · `1234 EUR` · `USD 5.5` | currency, symbol kept |
 | `45%` · `3.2 %` | percent, unit kept |
-| `(1,234)` · `($500)` | accounting negatives |
+| `(1,234)` · `($500)` · `$(2,400)` | accounting negatives, including Excel's symbol-outside form |
 | `−12` | unicode minus |
 | `150k` · `3.2M` · `1.4bn` · `7T` | magnitude suffixes |
 | `2026-07-10` · `2026-07-10T14:30:00Z` | ISO 8601 |
 | `2024-01` · `2024/07` | month keys |
 | `Mar 3, 2026` · `3 March 2026` · `Mar 2026` | named months |
 | `10/07/2026` · `10.07.2026` · `1/2/26` | slashed/dotted dates (see below) |
-| `""` · `N/A` · `null` · `—` · `NaN` · `#N/A` … | missing |
+| `""` · `N/A` · `null` · `—` · `NaN` · `±inf` · `#N/A` … | missing |
+| `'02134'` | an identifier — kept as text, so the leading zero survives |
 
 Grouping is *validated*, not guessed: `1,23,4` and `12.34.56` are not
 numbers and won't silently become them.
+
+## Shapes beyond CSV
+
+JSON and NDJSON are read as records (`[{...}, {...}]`, `{"col": [...]}`,
+or one object per line). Junk preamble rows before the real table are
+skipped, and Excel's `sep=;` directive is honoured — both reported.
+Duplicate header names are made reachable (`value`, `value.2`).
+
+`dtypes={"zip": "category", "ts": "temporal"}` overrides the classifier
+when the data is right and the guess is wrong.
 
 ## The two judgement calls (and how they're made)
 
@@ -52,7 +65,15 @@ comma-as-decimal, with a note.
 any value forces day-first (`13/02/…`), the column is day-first; if
 every value is ambiguous, the reading that makes the column
 chronological wins; failing that, day-first (the worldwide majority
-convention) with a note.
+convention). **Every one of those branches emits a note** — the choice is
+never silent.
+
+**Mixed currencies.** A column holding both `$100` and `€90` gets *no*
+unit on its axis, plus a note: dollars and euros are not commensurable,
+and labelling them all `$` would be a lie.
+
+**Timezones.** Any offset (`…Z`, `+02:00`) is applied and dropped, so a
+column never mixes aware and naive datetimes.
 
 ## Missing values
 

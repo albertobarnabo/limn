@@ -45,7 +45,7 @@ def draw_lines(g, series, to_x, to_y, theme, markers):
             continue
         g.add(El("path", d=polyline_path(pts), fill="none",
                  stroke=s["color"], stroke_width=theme.line_width,
-                 stroke_dasharray="7 4" if s.get("dash") else None,
+                 stroke_dasharray=s.get("dash") or None,
                  stroke_linejoin="round", stroke_linecap="round"))
         if markers and len(drawable) <= 30:
             for x, y in drawable:
@@ -176,7 +176,7 @@ def draw_bars(g, series, band, to_v, centers, theme, stacked, horizontal,
         w = min(theme.bar_max, band._bw)
         pos_base = {c: 0.0 for c in cats}
         neg_base = {c: 0.0 for c in cats}
-        tops = {}
+        tops, bottoms = {}, {}
         for s in series:
             values = {c: v for c, v in s["points"]}
             for c in cats:
@@ -192,13 +192,20 @@ def draw_bars(g, series, band, to_v, centers, theme, stacked, horizontal,
                           shave=not first)
                 base[c] += v
                 tops[c] = to_v(pos_base[c])
+                bottoms[c] = to_v(neg_base[c])
         if labels:
+            requests = []
             for c in cats:
-                total = pos_base[c]
-                _bar_label(g, centers(c), tops.get(c, zero_px), w, total,
-                           fmt, theme, horizontal, positive=True, ink=ink)
-        return
+                # The honest total of +10 and -5 is 5, not 10: label the net
+                # and hang it off whichever end the net actually reaches.
+                net = pos_base[c] + neg_base[c]
+                anchor = tops.get(c, zero_px) if net >= 0 \
+                    else bottoms.get(c, zero_px)
+                requests.append((centers(c), anchor, w, net))
+            return _place_bar_labels(g, requests, fmt, theme, horizontal, ink)
+        return 0
 
+    requests = []
     w, offsets = bar_geometry(len(series), band._bw, theme.bar_max)
     for s, off in zip(series, offsets):
         for c, v in s["points"]:
@@ -210,8 +217,44 @@ def draw_bars(g, series, band, to_v, centers, theme, stacked, horizontal,
                       horizontal, side_pos if v >= 0 else side_neg,
                       shave=False)
             if labels:
-                _bar_label(g, pos + w / 2, end_px, w, v, fmt, theme,
-                           horizontal, positive=v >= 0, ink=ink)
+                requests.append((pos + w / 2, end_px, w, v))
+    if labels:
+        return _place_bar_labels(g, requests, fmt, theme, horizontal, ink)
+    return 0
+
+
+def _place_bar_labels(g, requests, fmt, theme, horizontal, ink):
+    """Draw value labels, skipping any that would collide.
+
+    Grouped bars put neighbouring labels a bar-width apart, which is often
+    narrower than the numbers themselves; overlapping text reads as one
+    run-on number, which is worse than no label.  Returns how many were
+    dropped so the figure can say so.
+    """
+    placed, dropped = [], 0
+    for band_center, end_px, w, value in requests:
+        text = fmt(value)
+        tw = text_width(text, theme.size_label)
+        if horizontal:
+            x = end_px + 5 if value >= 0 else end_px - 5 - tw
+            box = (x, band_center - theme.size_label / 2,
+                   x + tw, band_center + theme.size_label / 2)
+        else:
+            y = end_px - 6 if value >= 0 else end_px + 6 + theme.size_label
+            box = (band_center - tw / 2, y - theme.size_label,
+                   band_center + tw / 2, y)
+        if any(_overlaps(box, other) for other in placed):
+            dropped += 1
+            continue
+        placed.append(box)
+        _bar_label(g, band_center, end_px, w, value, fmt, theme, horizontal,
+                   positive=value >= 0, ink=ink)
+    return dropped
+
+
+def _overlaps(a, b, pad=2.0):
+    return not (a[2] + pad <= b[0] or b[2] + pad <= a[0]
+                or a[3] + pad <= b[1] or b[3] + pad <= a[1])
 
 
 def _emit_bar(g, band_pos, w, start_px, end_px, color, theme, horizontal,
